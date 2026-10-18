@@ -3,7 +3,7 @@ name = "filecraft"
 version = "0.1.0"
 edition = "2024"
 description = "Instant file search for Windows: an Everything-style desktop app with NTFS MFT indexing"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "FileCraft"

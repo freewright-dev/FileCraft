@@ -57,4 +57,4 @@ PR needs one approving review before it can be merged.
 
 ## License
 
-[MIT](LICENSE)
+[GNU GPL v3.0 or later](LICENSE)
