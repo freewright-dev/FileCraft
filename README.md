@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.png" alt="FileCraft logo: an orange folder with a magnifying glass" width="160"></p>
+<p align="center"><img src="assets/logos/logo.png" alt="FileCraft logo: an orange folder with a magnifying glass" width="160"></p>
 
 <h1 align="center">FileCraft</h1>
 

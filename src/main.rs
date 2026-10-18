@@ -37,7 +37,7 @@ fn main() -> eframe::Result {
 
 /// The window and taskbar icon, decoded from the PNG baked into the binary.
 fn app_icon() -> egui::IconData {
-    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+    let img = image::load_from_memory(include_bytes!("../assets/logos/icon.png"))
         .expect("bundled icon is a valid PNG")
         .into_rgba8();
     let (width, height) = img.dimensions();
