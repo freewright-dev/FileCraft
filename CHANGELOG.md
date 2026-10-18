@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - FileCraft: a Windows desktop app (egui) modelled on Everything, with one search box over
   every fixed drive.
 - App icon (a pouncing cat with a magnifying glass), embedded in the exe and shown in the window and taskbar.
-- Launch video and hero screenshot in `docs/media/`.
+- Hero screenshot in `docs/media/`.
 - NTFS master file table indexing when running as administrator, with a parallel folder scan as
   the fallback, and a **Run as admin** button to restart elevated.
 - Per-drive index cache in `%LOCALAPPDATA%\FileCraft\index`, loaded at startup and refreshed
