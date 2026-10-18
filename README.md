@@ -2,7 +2,7 @@
 
 <h1 align="center">FileCraft</h1>
 
-<p align="center">Part of <a href="https://github.com/openfield-labs">Openfield Labs</a></p>
+<p align="center">Part of <a href="https://github.com/freewright-dev">Freewright</a></p>
 
 Instant file search for Windows: a desktop app in the spirit of
 [Everything](https://www.voidtools.com/), written in Rust. It indexes every file and folder on your
