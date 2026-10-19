@@ -4,6 +4,8 @@
 
 <p align="center">Part of <a href="https://github.com/freewright-dev">Freewright</a></p>
 
+<p align="center"><a href="https://discord.gg/SAy3t4BvJj"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Join the Freewright Discord"></a></p>
+
 Instant file search for Windows: a desktop app in the spirit of
 [Everything](https://www.voidtools.com/), written in Rust. It indexes every file and folder on your
 fixed drives and filters millions of entries as you type.
@@ -54,6 +56,8 @@ $env:FILECRAFT_BENCH_ROOT = "D:\"; cargo test --release bench_real_drive -- --ig
 
 Changes go through pull requests: create a branch, push it and open a PR against `main`. Every
 PR needs one approving review before it can be merged.
+
+Questions or ideas? Join the [Freewright Discord](https://discord.gg/SAy3t4BvJj).
 
 ## License
 
