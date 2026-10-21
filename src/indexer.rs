@@ -179,7 +179,7 @@ impl Job {
         let mut fresh = false;
 
         if !self.has_index
-            && let Ok(cached) = VolumeIndex::load(&cache_path(letter)) {
+            && let Ok(cached) = VolumeIndex::load(&cache_path(letter), letter) {
                 let age = cached.built_at.elapsed().unwrap_or(Duration::MAX);
                 fresh = age < self.max_age;
                 self.publish(cached);

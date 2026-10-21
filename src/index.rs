@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -86,17 +86,13 @@ impl VolumeIndex {
     #[inline]
     pub fn name(&self, idx: u32) -> &str {
         let e = &self.entries[idx as usize];
-        self.names
-            .get(e.name_off as usize..e.name_off as usize + e.name_len as usize)
-            .unwrap_or("")
+        arena_str(&self.names, e.name_off, e.name_len).unwrap_or("")
     }
 
     #[inline]
     pub fn lower_name(&self, idx: u32) -> &str {
         let e = &self.entries[idx as usize];
-        self.lower
-            .get(e.lower_off as usize..e.lower_off as usize + e.lower_len as usize)
-            .unwrap_or("")
+        arena_str(&self.lower, e.lower_off, e.lower_len).unwrap_or("")
     }
 
     /// Appends the full path of `idx` (e.g. `C:\Users\me\file.txt`) to `buf`.
@@ -231,7 +227,12 @@ impl VolumeBuilder {
         } else {
             self.lower.push_str(&name.to_lowercase());
         }
-        let lower_len = (self.lower.len() - lower_off as usize).min(u16::MAX as usize) as u16;
+        // Lowercasing can lengthen a name; cut on a character boundary so the range stays valid.
+        let mut lower_end = self.lower.len().min(lower_off as usize + u16::MAX as usize);
+        while !self.lower.is_char_boundary(lower_end) {
+            lower_end -= 1;
+        }
+        let lower_len = (lower_end - lower_off as usize) as u16;
         Entry {
             name_off,
             lower_off,
@@ -329,6 +330,13 @@ impl VolumeBuilder {
             by_date,
         }
     }
+}
+
+/// The `len` bytes at `off` in a name arena, if they lie inside it on character boundaries.
+#[inline]
+fn arena_str(arena: &str, off: u32, len: u16) -> Option<&str> {
+    let start = off as usize;
+    arena.get(start..start.checked_add(len as usize)?)
 }
 
 fn truncate_name(name: &str) -> &str {
@@ -463,6 +471,10 @@ where
 // ─── Disk cache ─────────────────────────────────────────────────────────────
 
 const CACHE_MAGIC: &[u8; 8] = b"FFSIDX\0\x02";
+/// Largest cache file that is read: about 40 million entries at roughly 100 bytes each.
+const MAX_CACHE_BYTES: u64 = 4 << 30;
+/// Serialized size of one [`Entry`].
+const ENTRY_BYTES: usize = 36;
 
 pub fn data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -515,21 +527,31 @@ impl VolumeIndex {
         fs::rename(&tmp, path)
     }
 
-    pub fn load(path: &Path) -> io::Result<VolumeIndex> {
-        let data = fs::read(path)?;
+    /// Reads the cache of drive `letter`. Anything malformed is an `InvalidData` error rather
+    /// than a panic, so a corrupt or foreign cache is ignored and rebuilt.
+    pub fn load(path: &Path, letter: char) -> io::Result<VolumeIndex> {
+        let data = read_with_budget(path, MAX_CACHE_BYTES)?;
         let mut r = Reader { data: &data, pos: 0 };
         if r.bytes(8)? != CACHE_MAGIC {
             return Err(invalid("unknown cache format"));
         }
-        let letter = char::from_u32(r.u32()?).ok_or_else(|| invalid("bad drive letter"))?;
-        let source = if r.u8()? == 1 { Source::Mft } else { Source::Walk };
-        let built_at = UNIX_EPOCH + Duration::from_secs(r.u64()?);
+        if char::from_u32(r.u32()?) != Some(letter) {
+            return Err(invalid("cache belongs to another drive"));
+        }
+        let source = match r.u8()? {
+            0 => Source::Walk,
+            1 => Source::Mft,
+            _ => return Err(invalid("bad index source")),
+        };
+        let built_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(r.u64()?))
+            .ok_or_else(|| invalid("bad build timestamp"))?;
         let build_time = Duration::from_millis(r.u64()?);
         let names = r.string()?;
         let lower = r.string()?;
 
-        let count = r.u64()? as usize;
-        if count == 0 || count > (u32::MAX - 1) as usize || count * 36 > data.len() {
+        let count = r.len()?;
+        if count == 0 || count > (u32::MAX - 1) as usize || count.checked_mul(ENTRY_BYTES).is_none_or(|n| n > data.len()) {
             return Err(invalid("bad entry count"));
         }
         let mut entries = Vec::with_capacity(count);
@@ -547,21 +569,37 @@ impl VolumeIndex {
             if e.parent != NONE && e.parent as usize >= count {
                 return Err(invalid("bad parent id"));
             }
+            if arena_str(&names, e.name_off, e.name_len).is_none() || arena_str(&lower, e.lower_off, e.lower_len).is_none() {
+                return Err(invalid("bad name range"));
+            }
             entries.push(e);
         }
+        if entries[0].parent != NONE || !entries[0].is_dir() {
+            return Err(invalid("bad root entry"));
+        }
+        check_acyclic(&entries)?;
 
+        // Each order lists every entry that has a parent (so not the root) exactly once.
+        let listed = entries.iter().skip(1).filter(|e| e.parent != NONE).count();
+        let mut seen = vec![0u8; count];
         let mut orders = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let n = r.u64()? as usize;
-            if n >= count {
+        for pass in 1..=4u8 {
+            if r.len()? != listed {
                 return Err(invalid("bad order length"));
             }
-            let raw = r.bytes(n * 4)?;
+            let raw = r.bytes(listed * 4)?;
             let order: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-            if order.iter().any(|&id| id as usize >= count) {
-                return Err(invalid("bad order id"));
+            for &id in &order {
+                let i = id as usize;
+                if i == 0 || i >= count || entries[i].parent == NONE || seen[i] == pass {
+                    return Err(invalid("bad order id"));
+                }
+                seen[i] = pass;
             }
             orders.push(order);
+        }
+        if r.pos != data.len() {
+            return Err(invalid("trailing data in cache"));
         }
         let by_date = orders.pop().unwrap();
         let by_size = orders.pop().unwrap();
@@ -588,6 +626,46 @@ fn invalid(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
+/// Reads a whole file, refusing one larger than `budget` bytes.
+fn read_with_budget(path: &Path, budget: u64) -> io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > budget {
+        return Err(invalid("cache file too large"));
+    }
+    let mut data = Vec::with_capacity(usize::try_from(len).map_err(|_| invalid("cache file too large"))?);
+    // `take` keeps the budget even if the file grows while it is read.
+    file.take(budget + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > budget {
+        return Err(invalid("cache file too large"));
+    }
+    Ok(data)
+}
+
+/// Rejects parent links that loop instead of ending at an entry without a parent.
+fn check_acyclic(entries: &[Entry]) -> io::Result<()> {
+    const UNCHECKED: u8 = 0;
+    const ON_CHAIN: u8 = 1;
+    const ENDS: u8 = 2;
+    let mut state = vec![UNCHECKED; entries.len()];
+    let mut chain = Vec::new();
+    for start in 0..entries.len() as u32 {
+        let mut cur = start;
+        while cur != NONE && state[cur as usize] == UNCHECKED {
+            state[cur as usize] = ON_CHAIN;
+            chain.push(cur);
+            cur = entries[cur as usize].parent;
+        }
+        if cur != NONE && state[cur as usize] == ON_CHAIN {
+            return Err(invalid("parent links form a loop"));
+        }
+        for id in chain.drain(..) {
+            state[id as usize] = ENDS;
+        }
+    }
+    Ok(())
+}
+
 struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
@@ -612,8 +690,12 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> io::Result<u64> {
         Ok(u64::from_le_bytes(self.bytes(8)?.try_into().unwrap()))
     }
+    /// A `u64` length or count that must also fit in `usize`.
+    fn len(&mut self) -> io::Result<usize> {
+        usize::try_from(self.u64()?).map_err(|_| invalid("length out of range"))
+    }
     fn string(&mut self) -> io::Result<String> {
-        let n = self.u64()? as usize;
+        let n = self.len()?;
         String::from_utf8(self.bytes(n)?.to_vec()).map_err(|_| invalid("bad name table"))
     }
 }
@@ -670,12 +752,66 @@ pub mod tests {
         let v = sample();
         let path = std::env::temp_dir().join(format!("filecraft-test-{}.idx", std::process::id()));
         v.save(&path).unwrap();
-        let loaded = VolumeIndex::load(&path).unwrap();
+        let loaded = VolumeIndex::load(&path, 'C').unwrap();
         let _ = fs::remove_file(&path);
         assert_eq!(loaded.letter, 'C');
         assert_eq!(names(&loaded, &loaded.by_path), names(&v, &v.by_path));
         let main = loaded.by_name[2];
         assert_eq!(loaded.full_path(main), r"C:\src\main.rs");
         assert_eq!(loaded.entry(main).size, 300);
+    }
+
+    fn cache_bytes(v: &VolumeIndex) -> Vec<u8> {
+        let path = std::env::temp_dir().join(format!("filecraft-test-bytes-{}.idx", std::process::id()));
+        v.save(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        bytes
+    }
+
+    /// Loads `bytes` as a cache of drive `letter` and returns the error it must produce.
+    fn load_error(label: &str, bytes: &[u8], letter: char) -> io::Error {
+        let path = std::env::temp_dir().join(format!("filecraft-test-{label}-{}.idx", std::process::id()));
+        fs::write(&path, bytes).unwrap();
+        let result = VolumeIndex::load(&path, letter);
+        let _ = fs::remove_file(&path);
+        let err = result.err().unwrap_or_else(|| panic!("{label}: malformed cache was accepted"));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{label}: {err}");
+        err
+    }
+
+    /// FC-02: the audit's 21-byte cache with an overflowing timestamp used to panic (and abort).
+    #[test]
+    fn overflowing_timestamp_is_an_error_not_a_panic() {
+        let mut bytes = CACHE_MAGIC.to_vec();
+        bytes.extend_from_slice(&('C' as u32).to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        load_error("overflow", &bytes, 'C');
+    }
+
+    #[test]
+    fn malformed_caches_are_rejected() {
+        let v = sample();
+        let good = cache_bytes(&v);
+        let entries_at = 8 + 4 + 1 + 8 + 8 + (8 + v.names.len()) + (8 + v.lower.len()) + 8;
+        let entry = |i: usize| entries_at + i * ENTRY_BYTES;
+        let orders_at = entry(v.entries.len());
+        let patch = |at: usize, value: u32| {
+            let mut bytes = good.clone();
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            bytes
+        };
+
+        load_error("other-drive", &good, 'D');
+        load_error("truncated", &good[..good.len() - 1], 'C');
+        load_error("trailing", &[good.as_slice(), &[0]].concat(), 'C');
+        load_error("bad-source", &[&good[..12], &[7], &good[13..]].concat(), 'C');
+        load_error("name-range", &patch(entry(1), u32::MAX), 'C');
+        load_error("parent-loop", &patch(entry(1) + 8, 1), 'C');
+        load_error("root-parent", &patch(entry(0) + 8, 1), 'C');
+        let second_id = u32::from_le_bytes(good[orders_at + 12..orders_at + 16].try_into().unwrap());
+        load_error("duplicate-order-id", &patch(orders_at + 8, second_id), 'C');
+        load_error("order-lists-root", &patch(orders_at + 8, 0), 'C');
     }
 }
