@@ -251,8 +251,10 @@ fn parse_size_cmp(value: &str) -> Result<Cmp, String> {
     if v == "empty" {
         return Ok(Cmp::Le(0));
     }
+    // Sizes outside 0..i64::MAX bytes are errors; nothing saturates or wraps.
+    let after = |n: i64| n.checked_add(1).ok_or_else(|| "size out of range".to_string());
     if let Some((lo, hi)) = v.split_once("..") {
-        return Ok(Cmp::Range(parse_bytes(lo)?, parse_bytes(hi)?.saturating_add(1)));
+        return Ok(Cmp::Range(parse_bytes(lo)?, after(parse_bytes(hi)?)?));
     }
     let (ctor, rest): (fn(i64) -> Cmp, &str) = if let Some(r) = v.strip_prefix(">=") {
         (Cmp::Ge, r)
@@ -264,7 +266,7 @@ fn parse_size_cmp(value: &str) -> Result<Cmp, String> {
         (Cmp::Lt, r)
     } else {
         let exact = parse_bytes(v.trim_start_matches('='))?;
-        return Ok(Cmp::Range(exact, exact + 1));
+        return Ok(Cmp::Range(exact, after(exact)?));
     };
     Ok(ctor(parse_bytes(rest)?))
 }
@@ -282,7 +284,12 @@ fn parse_bytes(s: &str) -> Result<i64, String> {
         "t" | "tb" => 1024f64.powi(4),
         u => return Err(format!("unknown size unit `{u}` (use kb, mb, gb, tb)")),
     };
-    Ok((n * mult) as i64)
+    let bytes = n * mult;
+    // `as` would saturate silently; `i64::MAX as f64` already rounds up to 2^63.
+    if !bytes.is_finite() || bytes >= i64::MAX as f64 {
+        return Err(format!("size `{s}` out of range"));
+    }
+    Ok(bytes as i64)
 }
 
 fn parse_date_cmp(value: &str) -> Result<Cmp, String> {
@@ -323,7 +330,12 @@ fn parse_date_cmp(value: &str) -> Result<Cmp, String> {
         "y" | "year" | "years" => 365 * 86_400,
         _ => return Err(format!("unknown date unit `{unit}` (use min, h, d, w, y)")),
     };
-    Ok(Cmp::Ge(now_filetime() - n * secs * TICKS_PER_SEC))
+    let span = n
+        .checked_mul(secs)
+        .and_then(|s| s.checked_mul(TICKS_PER_SEC))
+        .ok_or_else(|| format!("date interval `{value}` out of range"))?;
+    // A span reaching back before 1601 (FILETIME zero) simply means "any date".
+    Ok(Cmp::Ge(now_filetime().saturating_sub(span).max(0)))
 }
 
 fn day_start(s: &str) -> Result<i64, String> {
@@ -691,6 +703,26 @@ mod tests {
         assert_eq!(names("regex:^[a-m].*\\.\\w+$"), ["big.bin", "main.rs"]);
         assert!(Query::parse("size:>10zb", SearchOptions::default()).is_err());
         assert!(Query::parse("regex:(", SearchOptions::default()).is_err());
+    }
+
+    /// FC-09: out-of-range numbers are errors instead of panics (debug) or wrapped bounds (release).
+    #[test]
+    fn numeric_overflow_is_rejected() {
+        let parse = |q: &str| Query::parse(q, SearchOptions::default());
+        for q in [
+            "size:9223372036854775807",
+            "size:..9223372036854775807",
+            "size:>99999999tb",
+            "size:<9999999999999999999999",
+            "dm:9223372036854775807y",
+            "dm:999999999999999h",
+        ] {
+            assert!(parse(q).is_err(), "{q} was accepted");
+        }
+        // Large but representable values still work.
+        assert_eq!(names("size:<8000000tb"), names("file:"));
+        assert_eq!(names("dm:1000y"), names(""), "a span before 1601 matches every date");
+        assert!(parse("size:9223372036854774784").is_ok());
     }
 
     #[test]

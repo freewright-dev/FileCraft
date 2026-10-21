@@ -65,6 +65,10 @@ All notable changes to this project are documented here. The format follows
   or zero-length runs, runs past the end of the volume) and inconsistent volume geometry, and caps
   the record count at 64 Mi. It falls back to the folder scan instead of reading wrong offsets or
   panicking. Records shorter than the fixed header are skipped instead of read out of bounds (FC-10).
+- Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
+  are reported as errors instead of panicking the search worker (debug builds) or wrapping into
+  wrong filters (release builds). A relative date reaching back before 1601 matches every date.
+  The saved re-index age is clamped to the settings range of one week (FC-09).
 
 ### Security
 

@@ -109,7 +109,8 @@ Right-click a result, use the preview pane buttons, or the keyboard:
   be an `.exe`, `.com`, `.bat` or `.cmd` on `PATH` or a full path (quote paths with spaces, e.g.
   `"C:\Program Files\Editor\editor.exe" -n`). It runs directly, not through a shell.
 - **Drives** — untick a drive to stop indexing and searching it.
-- **Re-index on startup when older than** — cache age in minutes (0 re-indexes on every start).
+- **Re-index on startup when older than** — cache age in minutes, up to 10,080 (one week); 0
+  re-indexes on every start.
 - **Delete cached indexes** — removes the cache files; drives are rebuilt on the next re-index.
 
 Settings, the window size, sort order and search options are remembered between sessions.
