@@ -69,6 +69,11 @@ All notable changes to this project are documented here. The format follows
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
   The saved re-index age is clamped to the settings range of one week (FC-09).
+- Previewing a folder with millions of entries no longer collects and sorts all of them to show
+  1,000. Only the first 1,000 in display order are kept while the rest are counted, and the
+  listing stops as soon as another item is selected. The folder scan streams large folders in
+  bounded batches, so a slow collector holds the workers back, and it can be cancelled part-way
+  through a folder (MIN-01).
 
 ### Security
 

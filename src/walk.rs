@@ -1,10 +1,28 @@
 //! Fallback indexer: a parallel directory walk (works without administrator rights).
 
 use crate::index::{ATTR_DIRECTORY, ATTR_REPARSE_POINT, Source, VolumeBuilder, VolumeIndex, thread_count};
-use crossbeam_channel::{RecvTimeoutError, unbounded};
+use crossbeam_channel::{RecvTimeoutError, Sender, bounded, unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// Most entries sent to the collector at once; big folders are streamed in several batches.
+const BATCH: usize = if cfg!(test) { 8 } else { 4096 };
+/// Batches waiting for the collector before workers wait for it. Only workers send and only the
+/// collector receives, so a full channel slows the workers down but cannot deadlock.
+const QUEUED_BATCHES: usize = 64;
+/// Folders waiting in the shared queue before a worker keeps the ones it finds on its own stack
+/// (walked depth-first), which bounds the shared queue without ever blocking a worker on it.
+const SHARED_QUEUE_LIMIT: usize = 4096;
+
+/// State every worker shares.
+struct Shared<'a> {
+    next_id: AtomicU32,
+    /// Folders found but not finished, wherever they wait.
+    pending: AtomicUsize,
+    skipped: &'a AtomicUsize,
+    cancel: &'a AtomicBool,
+}
 
 struct Raw {
     idx: u32,
@@ -28,10 +46,9 @@ pub fn walk_volume(
     let start = Instant::now();
     std::fs::read_dir(root)?; // fail early when the drive is not readable
 
-    let next_id = AtomicU32::new(1);
-    let pending = AtomicUsize::new(1);
+    let shared = Shared { next_id: AtomicU32::new(1), pending: AtomicUsize::new(1), skipped, cancel };
     let (work_tx, work_rx) = unbounded::<(PathBuf, u32)>();
-    let (out_tx, out_rx) = unbounded::<Vec<Raw>>();
+    let (out_tx, out_rx) = bounded::<Vec<Raw>>(QUEUED_BATCHES);
     work_tx.send((root.to_path_buf(), 0))?;
 
     let threads = (thread_count() / 2).max(2);
@@ -42,26 +59,27 @@ pub fn walk_volume(
             let work_tx = work_tx.clone();
             let work_rx = work_rx.clone();
             let out_tx = out_tx.clone();
-            let (next_id, pending) = (&next_id, &pending);
+            let shared = &shared;
             s.spawn(move || {
+                let mut local = Vec::new();
                 loop {
-                    let (dir, dir_id) = match work_rx.recv_timeout(Duration::from_millis(5)) {
-                        Ok(job) => job,
-                        Err(RecvTimeoutError::Timeout) => {
-                            if pending.load(Ordering::Acquire) == 0 || cancel.load(Ordering::Relaxed) {
-                                break;
+                    let (dir, dir_id) = match local.pop() {
+                        Some(job) => job,
+                        None => match work_rx.recv_timeout(Duration::from_millis(5)) {
+                            Ok(job) => job,
+                            Err(RecvTimeoutError::Timeout) => {
+                                if shared.pending.load(Ordering::Acquire) == 0 || cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        },
                     };
                     if !cancel.load(Ordering::Relaxed) {
-                        let batch = read_one_dir(&dir, dir_id, next_id, pending, skipped, &work_tx);
-                        if !batch.is_empty() {
-                            let _ = out_tx.send(batch);
-                        }
+                        read_one_dir(&dir, dir_id, shared, &mut local, &work_tx, &out_tx);
                     }
-                    pending.fetch_sub(1, Ordering::AcqRel);
+                    shared.pending.fetch_sub(1, Ordering::AcqRel);
                 }
             });
         }
@@ -81,40 +99,55 @@ pub fn walk_volume(
     Ok(builder.finish(Source::Walk, start.elapsed()))
 }
 
+/// Lists one folder, streaming its entries to the collector in batches of at most [`BATCH`] and
+/// queueing its subfolders. Stops part-way when the walk is cancelled.
 fn read_one_dir(
     dir: &Path,
     dir_id: u32,
-    next_id: &AtomicU32,
-    pending: &AtomicUsize,
-    skipped: &AtomicUsize,
-    work_tx: &crossbeam_channel::Sender<(PathBuf, u32)>,
-) -> Vec<Raw> {
+    shared: &Shared,
+    local: &mut Vec<(PathBuf, u32)>,
+    work_tx: &Sender<(PathBuf, u32)>,
+    out_tx: &Sender<Vec<Raw>>,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         // The folder itself is indexed; its contents are not.
-        skipped.fetch_add(1, Ordering::Relaxed);
-        return Vec::new();
+        shared.skipped.fetch_add(1, Ordering::Relaxed);
+        return;
     };
     let mut batch = Vec::new();
     for entry in rd {
+        if shared.cancel.load(Ordering::Relaxed) {
+            return;
+        }
         let Ok(entry) = entry else {
-            skipped.fetch_add(1, Ordering::Relaxed);
+            shared.skipped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         // On Windows this metadata comes from the directory listing itself (no extra syscall).
         let Ok(meta) = entry.metadata() else {
-            skipped.fetch_add(1, Ordering::Relaxed);
+            shared.skipped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
         let (attrs, size, mtime) = attributes(&meta);
-        let idx = next_id.fetch_add(1, Ordering::Relaxed);
+        let idx = shared.next_id.fetch_add(1, Ordering::Relaxed);
         if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
-            pending.fetch_add(1, Ordering::AcqRel);
-            let _ = work_tx.send((entry.path(), idx));
+            shared.pending.fetch_add(1, Ordering::AcqRel);
+            let job = (entry.path(), idx);
+            if work_tx.len() < SHARED_QUEUE_LIMIT {
+                let _ = work_tx.send(job);
+            } else {
+                local.push(job);
+            }
         }
         batch.push(Raw { idx, parent: dir_id, name, attrs, size, mtime });
+        if batch.len() == BATCH {
+            let _ = out_tx.send(std::mem::take(&mut batch));
+        }
     }
-    batch
+    if !batch.is_empty() {
+        let _ = out_tx.send(batch);
+    }
 }
 
 #[cfg(windows)]
@@ -160,15 +193,43 @@ mod tests {
         assert_eq!(v.entry(a).size, 17);
     }
 
+    /// Runs `read_one_dir` alone and returns the batches it sent.
+    fn read_alone(dir: &Path, skipped: &AtomicUsize, cancel: &AtomicBool) -> Vec<Vec<Raw>> {
+        let shared = Shared { next_id: AtomicU32::new(1), pending: AtomicUsize::new(1), skipped, cancel };
+        let (work_tx, _work_rx) = unbounded();
+        let (out_tx, out_rx) = unbounded();
+        read_one_dir(dir, 0, &shared, &mut Vec::new(), &work_tx, &out_tx);
+        drop(out_tx);
+        out_rx.iter().collect()
+    }
+
     /// MIN-02: unreadable folders are counted instead of silently missing.
     #[test]
     fn unreadable_folders_are_counted() {
-        let (work_tx, _work_rx) = unbounded();
         let skipped = AtomicUsize::new(0);
         let missing = std::env::temp_dir().join(format!("filecraft-walk-missing-{}", std::process::id()));
-        let batch = read_one_dir(&missing, 0, &AtomicU32::new(1), &AtomicUsize::new(1), &skipped, &work_tx);
-        assert!(batch.is_empty());
+        assert!(read_alone(&missing, &skipped, &AtomicBool::new(false)).is_empty());
         assert_eq!(skipped.load(Ordering::Relaxed), 1);
+    }
+
+    /// MIN-01: a big folder reaches the collector in bounded batches, and cancellation stops the
+    /// listing part-way instead of after the whole folder.
+    #[test]
+    fn big_folders_are_streamed_and_cancellable() {
+        let dir = std::env::temp_dir().join(format!("filecraft-walk-big-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..3 * BATCH + 1 {
+            std::fs::write(dir.join(format!("{i}.txt")), "").unwrap();
+        }
+        let batches = read_alone(&dir, &AtomicUsize::new(0), &AtomicBool::new(false));
+        let cancelled = read_alone(&dir, &AtomicUsize::new(0), &AtomicBool::new(true));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(batches.len(), 4);
+        assert!(batches.iter().all(|b| b.len() <= BATCH));
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 3 * BATCH + 1);
+        assert!(cancelled.is_empty());
     }
 }
 
