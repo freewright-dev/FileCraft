@@ -82,20 +82,25 @@ pub struct Preview {
     pub not_editable: Option<String>,
     /// The complete file as it was read; `None` until the whole file has been read.
     loaded: Option<FileVersion>,
+    /// The whole text of a truncated preview, read on the preview thread for editing.
+    edit_text: Option<String>,
     crlf: bool,
     bom: bool,
 }
 
+/// A preview request: generation, path, whether it is a folder, whether it is for editing.
+type Request = (u64, PathBuf, bool, bool);
+
 /// Serial background I/O: rapid selection changes do not spawn unbounded readers.
 pub struct PreviewLoader {
-    requests: Sender<(u64, PathBuf, bool)>,
+    requests: Sender<Request>,
     results: Receiver<(u64, Preview)>,
     generation: u64,
 }
 
 impl PreviewLoader {
     pub fn new(on_result: impl Fn() + Send + 'static) -> Self {
-        let (requests, rx) = unbounded::<(u64, PathBuf, bool)>();
+        let (requests, rx) = unbounded::<Request>();
         let (tx, results) = unbounded();
         std::thread::Builder::new()
             .name("preview".into())
@@ -105,8 +110,8 @@ impl PreviewLoader {
                     while let Ok(newer) = rx.try_recv() {
                         request = newer;
                     }
-                    let (generation, path, is_dir) = request;
-                    let preview = Preview::load(&path, is_dir);
+                    let (generation, path, is_dir, edit) = request;
+                    let preview = if edit { Preview::load_for_edit(&path) } else { Preview::load(&path, is_dir) };
                     if tx.send((generation, preview)).is_err() {
                         break;
                     }
@@ -119,7 +124,13 @@ impl PreviewLoader {
 
     pub fn submit(&mut self, path: PathBuf, is_dir: bool) {
         self.generation += 1;
-        let _ = self.requests.send((self.generation, path, is_dir));
+        let _ = self.requests.send((self.generation, path, is_dir, false));
+    }
+
+    /// Requests a file preview that is also ready for editing (see [`Preview::load_for_edit`]).
+    pub fn submit_edit(&mut self, path: PathBuf) {
+        self.generation += 1;
+        let _ = self.requests.send((self.generation, path, false, true));
     }
 
     /// Only the most recently requested preview may replace the pane.
@@ -144,6 +155,7 @@ impl Preview {
             conflict: false,
             not_editable: None,
             loaded: None,
+            edit_text: None,
             crlf: false,
             bom: false,
         };
@@ -157,20 +169,62 @@ impl Preview {
         };
         // Check before reading content, enumerating folders, or handing images to egui.
         // Cloud placeholders must not be downloaded just because a row was selected.
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS};
-            if meta.file_attributes() & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0 {
-                p.not_editable = Some("not available locally".into());
-                p.content = Content::Message(
-                    "Not fully available on this device. Preview skipped to avoid a cloud download. Download it in your sync app, then select another result and return.".into(),
-                );
-                return p;
-            }
+        if is_cloud_placeholder(&meta) {
+            p.not_editable = Some("not available locally".into());
+            p.content = Content::Message(
+                "Not fully available on this device. Preview skipped to avoid a cloud download. Download it in your sync app, then select another result and return.".into(),
+            );
+            return p;
         }
         p.content = if is_dir { load_dir(path) } else { p.load_file(&meta) };
         p
+    }
+
+    /// Like [`Preview::load`], but a truncated text file is also read in full for editing, so
+    /// that read happens on the preview thread instead of the UI thread.
+    pub fn load_for_edit(path: &Path) -> Preview {
+        let mut p = Preview::load(path, false);
+        if p.needs_full_read() {
+            match p.read_full() {
+                Ok(text) => p.edit_text = Some(text),
+                Err(reason) => p.not_editable = Some(reason),
+            }
+        }
+        p
+    }
+
+    /// Whether editing has to wait for [`Preview::load_for_edit`] to read the whole file.
+    pub fn needs_full_read(&self) -> bool {
+        !self.editing
+            && self.can_edit()
+            && self.edit_text.is_none()
+            && matches!(self.content, Content::Text { truncated: true, .. })
+    }
+
+    /// Reads the whole file for editing through one handle, so the bytes and the recorded
+    /// version match. The read itself stops past [`EDIT_MAX_BYTES`], even if the file grew
+    /// since it was previewed. Errors are reasons for [`Preview::not_editable`].
+    fn read_full(&mut self) -> Result<String, String> {
+        let file = fs::File::open(&self.path).map_err(|e| format!("file not readable ({e})"))?;
+        let meta = file.metadata().map_err(|e| format!("file not readable ({e})"))?;
+        if !meta.is_file() {
+            return Err("not a regular file".into());
+        }
+        if is_cloud_placeholder(&meta) {
+            return Err("not available locally".into());
+        }
+        let mut bytes = Vec::new();
+        (&file).take(EDIT_MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("file not readable ({e})"))?;
+        if bytes.len() as u64 > EDIT_MAX_BYTES {
+            return Err(format!("larger than {} MB", EDIT_MAX_BYTES / (1024 * 1024)));
+        }
+        let version = FileVersion::of(&file, &bytes).map_err(|e| format!("file not readable ({e})"))?;
+        let (text, valid) = self.decode(&bytes, false);
+        if !valid {
+            return Err("not UTF-8 text".into());
+        }
+        self.loaded = Some(version);
+        Ok(text)
     }
 
     fn load_file(&mut self, meta: &fs::Metadata) -> Content {
@@ -180,8 +234,9 @@ impl Preview {
             return Content::Image(format!("file://{}", self.path.display()));
         }
 
-        let mut buf = Vec::with_capacity(PREVIEW_BYTES.min(meta.len() as usize));
-        let file = match fs::File::open(&self.path).and_then(|f| (&f).take(PREVIEW_BYTES as u64).read_to_end(&mut buf).map(|_| f)) {
+        // One byte more than is shown tells whether the file is longer, whatever `meta` says now.
+        let mut buf = Vec::with_capacity(PREVIEW_BYTES.min(meta.len() as usize) + 1);
+        let file = match fs::File::open(&self.path).and_then(|f| (&f).take(PREVIEW_BYTES as u64 + 1).read_to_end(&mut buf).map(|_| f)) {
             Ok(f) => f,
             Err(e) => {
                 self.not_editable = Some("file not readable".into());
@@ -193,7 +248,8 @@ impl Preview {
             return Content::Binary(hex_dump(&buf[..buf.len().min(4096)]));
         }
 
-        let truncated = (buf.len() as u64) < meta.len();
+        let truncated = buf.len() > PREVIEW_BYTES;
+        buf.truncate(PREVIEW_BYTES);
         if !truncated {
             self.loaded = FileVersion::of(&file, &buf).ok();
         }
@@ -240,15 +296,8 @@ impl Preview {
             return Err("Only text files can be edited inline".into());
         };
         self.buffer = if *truncated {
-            let mut bytes = Vec::new();
-            let mut file = fs::File::open(&self.path).map_err(|e| e.to_string())?;
-            file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-            self.loaded = Some(FileVersion::of(&file, &bytes).map_err(|e| e.to_string())?);
-            let (text, valid) = self.decode(&bytes, false);
-            if !valid {
-                return Err("Cannot edit inline: not UTF-8 text".into());
-            }
-            text
+            // Never read here on the UI thread: `load_for_edit` reads it on the preview thread.
+            self.edit_text.take().ok_or("The whole file has not been read for editing yet")?
         } else {
             text.clone()
         };
@@ -314,6 +363,21 @@ impl Preview {
         Ok(())
     }
 
+}
+
+/// Offline or recall-on-access files (cloud placeholders) would be downloaded by reading them.
+fn is_cloud_placeholder(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS};
+        meta.file_attributes() & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        false
+    }
 }
 
 /// Opens the existing file for a save. Other programs may still read it, but on Windows they
@@ -450,6 +514,42 @@ mod tests {
         assert!(p.save(false).is_ok());
         assert_eq!(fs::read(&path).unwrap(), b"\xEF\xBB\xBFone\r\ntwo\r\nthree\r\n");
         assert!(!p.dirty);
+    }
+
+    /// FC-05: a file that grew past the limit after it was previewed is not read past the limit,
+    /// and a truncated preview is never read in full on the calling (UI) thread.
+    #[test]
+    fn edit_read_is_capped_and_off_the_ui_thread() {
+        let path = temp("grows.txt", &vec![b'a'; 600 * 1024]);
+        let mut p = Preview::load(&path, false);
+        assert!(p.needs_full_read());
+        fs::write(&path, vec![b'b'; 9 * 1024 * 1024]).unwrap();
+
+        assert!(p.begin_edit().is_err());
+        assert!(!p.editing && p.buffer.is_empty());
+        let reason = p.read_full().unwrap_err();
+        assert!(reason.contains("larger than 8 MB"), "{reason}");
+
+        let p = Preview::load_for_edit(&path);
+        assert!(!p.can_edit() && !p.needs_full_read());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn large_files_are_read_in_full_for_editing() {
+        let mut text = "line\r\n".repeat(100_000);
+        let path = temp("large.txt", text.as_bytes());
+        let mut p = Preview::load_for_edit(&path);
+        assert!(matches!(p.content, Content::Text { truncated: true, .. }));
+        assert!(!p.needs_full_read());
+        p.begin_edit().unwrap();
+        assert_eq!(p.buffer, text.replace("\r\n", "\n"));
+
+        p.buffer.push_str("end\n");
+        text.push_str("end\r\n");
+        assert!(p.save(false).is_ok());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        fs::remove_file(path).unwrap();
     }
 
     /// FC-03: starting an edit again on the same file must not reset unsaved work.
