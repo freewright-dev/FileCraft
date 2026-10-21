@@ -35,7 +35,13 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   (mtime, attributes), `$FILE_NAME` (parent, name; Win32 names are preferred over DOS 8.3 names)
   and the unnamed `$DATA` attribute (size). Extension records are merged into their base record.
   Only records reachable from the root (record 5) through valid parents are kept, which drops the
-  NTFS metadata files and anything under `$Extend`.
+  NTFS metadata files and anything under `$Extend`. Bad input fails closed and falls back to the
+  walk:
+  - geometry that is incomplete or inconsistent with the volume size;
+  - more than 64 Mi records;
+  - a data run that is empty, has a negative or overflowing LCN, or ends past the volume.
+
+  Records shorter than the fixed header are skipped.
 - **Walk** (`walk.rs`) — worker threads pull directories from a shared queue. Every entry gets its
   final id from an atomic counter, so subdirectories are queued with their id and a single
   collector thread fills the table without any path lookups. Junctions and symlinks are listed but
