@@ -873,6 +873,7 @@ mod tests {
             assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_OFFLINE) }, 0);
             let mut preview = Preview::load(path, is_dir);
             // Restore before assertions so a failed check doesn't leave an offline fixture.
+            // SAFETY: same NUL-terminated path as above.
             assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attributes) }, 0);
             assert!(matches!(&preview.content, Content::Message(msg) if msg.contains("cloud download")));
             assert!(!preview.can_edit());

@@ -57,6 +57,16 @@ $env:FILECRAFT_BENCH_ROOT = "D:\"; cargo test --release bench_real_drive -- --ig
 Changes go through pull requests: create a branch, push it and open a PR against `main`. Every
 PR needs one approving review before it can be merged.
 
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds, lints (`clippy -D warnings`)
+and tests on Windows, and checks dependencies with `cargo deny check` (policy in
+[`deny.toml`](deny.toml)) and `cargo audit`. Run the same checks locally before pushing:
+
+```powershell
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo deny check
+```
+
 Questions or ideas? Join the [Freewright Discord](https://discord.gg/SAy3t4BvJj).
 
 ## License

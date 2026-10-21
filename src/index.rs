@@ -635,7 +635,7 @@ impl VolumeIndex {
                 return Err(invalid("bad order length"));
             }
             let raw = r.bytes(listed * 4)?;
-            let order: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+            let order: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|&c| u32::from_le_bytes(c)).collect();
             for &id in &order {
                 let i = id as usize;
                 if i == 0 || i >= count || entries[i].parent == NONE || seen[i] == pass {

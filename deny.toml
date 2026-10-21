@@ -1,0 +1,51 @@
+# cargo-deny policy: `cargo deny check` (run in CI).
+
+[graph]
+# FileCraft is a Windows application. Checking only the Windows graph keeps the Unix-only
+# accessibility tree out: zbus_names, zvariant and zvariant_derive (RUSTSEC-2026-0370, -0371,
+# -0372, unmaintained since the zbus 6 merge) are in Cargo.lock but never built for Windows. If an
+# eframe/accesskit release moves to zbus 6, `cargo update` drops them from the lockfile too.
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+# Vulnerabilities, unmaintained and unsound crates and yanked versions all fail the check.
+# Add an `ignore` entry only with a reason that says why the advisory does not apply.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Reviewed permissive licenses, all compatible with FileCraft's GPL-3.0-or-later. Crates that
+# offer a choice (for example `Apache-2.0 OR GPL-2.0-only` in self_cell) pass through one of these.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[[licenses.exceptions]]
+# FileCraft itself.
+crate = "filecraft"
+allow = ["GPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+# egui's bundled fonts (Ubuntu and the emoji/icon fonts); the code is MIT OR Apache-2.0.
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
+[bans]
+# egui and the windows crates pull in a few versions of the same crates; report, do not fail.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
