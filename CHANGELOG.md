@@ -28,3 +28,10 @@ All notable changes to this project are documented here. The format follows
 - Settings for the editor command, which drives to index and cache age; window size, sort and
   search options persist between sessions.
 - User guide, architecture notes and an opt-in benchmark (`FILECRAFT_BENCH_ROOT`).
+
+### Security
+
+- External editor launches no longer go through `cmd /C`, so shell syntax in a file name (such as
+  `a&calc&.txt` or `%VAR%`) can no longer run commands. The editor is resolved on `PATH` and
+  started directly; `.cmd` shims such as VS Code's `code` still work. Quoted editor paths with
+  spaces are now accepted (FC-01).
