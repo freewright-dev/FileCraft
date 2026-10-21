@@ -2,14 +2,14 @@
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.rs` | Window setup (`eframe`), image loaders |
+| `src/main.rs` | Window setup (`eframe`) and app icon |
 | `src/app.rs` | The UI: search box, results table, preview/editor, status bar, settings, keys |
 | `src/index.rs` | `VolumeIndex` data model, builder, sort orders, folder sizes, disk cache |
 | `src/mft.rs` | NTFS master file table reader (administrator) |
 | `src/walk.rs` | Parallel directory walk (fallback, no admin) |
 | `src/indexer.rs` | Drive discovery and background (re)indexing per drive |
 | `src/search.rs` | Query language, parallel filtering, cross-drive merge, background searcher |
-| `src/preview.rs` | Preview content and inline editing (encoding, line endings, conflicts) |
+| `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts) |
 | `src/actions.rs` | Shell integration: open, reveal, properties, external editor, elevation |
 | `src/util.rs` | FILETIME and size formatting, local-time helpers |
 

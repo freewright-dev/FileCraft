@@ -60,7 +60,9 @@ Prefixes combine with everything else: `report ext:pdf dm:7d !draft`.
 
 ## Reading and editing files
 
-Select a file to preview it. Text files show their first 512 KB.
+Select a file to preview it. Text files show their first 512 KB. Images (PNG, JPEG, GIF, BMP,
+ICO, WebP) up to 64 MB and 16,384 pixels per side are shown scaled to fit; animations show their
+first frame.
 
 - **✏ Edit** (or F4) turns the preview into an editor for files up to 8 MB that are UTF-8 text.
   **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept.
