@@ -33,5 +33,6 @@ Before committing, update whatever the change affects:
 
 ## Before committing
 
-- `cargo test` and `cargo clippy --all-targets` must pass.
+- `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` must pass, as
+  in CI. When dependencies change, `cargo deny check` must pass too.
 - A bug fix comes with a regression test. Check that the test fails without the fix.

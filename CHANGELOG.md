@@ -28,6 +28,10 @@ All notable changes to this project are documented here. The format follows
 - Settings for the editor command, which drives to index and cache age; window size, sort and
   search options persist between sessions.
 - User guide, architecture notes and an opt-in benchmark (`FILECRAFT_BENCH_ROOT`).
+- CI on Windows (check, `clippy -D warnings`, tests) plus `cargo deny` and `cargo audit`. The
+  dependency policy in `deny.toml` checks the Windows graph, keeps advisory checks on, allows
+  only reviewed licenses and crates.io sources. A lint policy in `Cargo.toml` requires
+  `// SAFETY:` comments on `unsafe` blocks (MIN-03).
 
 ### Fixed
 

@@ -278,8 +278,10 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
                     continue;
                 }
                 let units: Vec<u16> = v[0x42..0x42 + name_chars * 2]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&c| u16::from_le_bytes(c))
                     .collect();
                 let name = String::from_utf16_lossy(&units);
                 if names.len() + name.len() > u32::MAX as usize {

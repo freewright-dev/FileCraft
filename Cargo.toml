@@ -34,6 +34,16 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 winresource = "0.1"
 
+# Checked in CI with `cargo clippy --all-targets -- -D warnings`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Every `unsafe` block states why it is sound in a `// SAFETY:` comment.
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
