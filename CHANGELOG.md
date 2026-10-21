@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format follows
 
 - Choosing *Edit in preview pane* or pressing F4 again while already editing no longer resets the
   buffer and silently discards unsaved changes (FC-03).
+- Saving an inline edit no longer recreates a file that was deleted on disk without asking, and
+  detects a file that was replaced or rewritten even when its modification time was kept. The
+  file is checked and written through one handle, so the path cannot be swapped in between, and
+  a copy of the original is kept until the write completes, so a failed save no longer leaves
+  it truncated (FC-04).
 
 ### Security
 

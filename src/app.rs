@@ -343,7 +343,7 @@ impl FileCraftApp {
                 true
             }
             Err(SaveError::Conflict) => {
-                self.set_status("The file changed on disk — choose Overwrite or Reload");
+                self.set_status("The file changed or was deleted on disk — choose Overwrite or Reload");
                 false
             }
             Err(SaveError::Io(e)) => {
@@ -805,7 +805,7 @@ impl FileCraftApp {
             });
             if conflict {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, "This file changed on disk since you opened it.");
+                    ui.colored_label(ui.visuals().error_fg_color, "This file changed or was deleted on disk since you opened it.");
                     if ui.button("Overwrite").clicked() {
                         force_save = true;
                     }
