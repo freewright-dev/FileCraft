@@ -815,6 +815,12 @@ impl FileCraftApp {
                     ui.colored_label(ui.visuals().warn_fg_color, "● modified");
                 }
             });
+            if let Some(style) = self.preview.as_ref().and_then(|p| p.mixed_newlines_saved_as()) {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("This file mixes CRLF and LF line endings. Saving uses {style} for every line."),
+                );
+            }
             if conflict {
                 ui.horizontal_wrapped(|ui| {
                     ui.colored_label(ui.visuals().error_fg_color, "This file changed or was deleted on disk since you opened it.");
@@ -1126,6 +1132,12 @@ fn drive_chip(ui: &mut egui::Ui, s: &crate::indexer::VolumeStatus) {
             }
             if s.refreshing {
                 tip.push_str(" · refreshing now");
+            }
+            if s.skipped > 0 {
+                tip.push_str(&format!("\n{} items could not be read and are missing", group_digits(s.skipped)));
+            }
+            if let Some(err) = &s.cache_error {
+                tip.push_str(&format!("\nThe index could not be cached: {err}"));
             }
             let mark = if s.refreshing { "⟳" } else { "✔" };
             (format!("{letter}: {mark}"), Some(Color32::from_rgb(90, 170, 90)), tip)

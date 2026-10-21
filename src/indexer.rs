@@ -44,6 +44,10 @@ pub struct VolumeStatus {
     pub build_time: Option<Duration>,
     /// Shown while a rebuild of a cached index is running.
     pub refreshing: bool,
+    /// Items the last folder scan could not read (they are missing from the index).
+    pub skipped: usize,
+    /// Why the last index could not be written to the cache, if it could not.
+    pub cache_error: Option<String>,
 }
 
 pub enum IndexEvent {
@@ -101,6 +105,8 @@ impl Indexer {
                 built_at: previous.as_ref().and_then(|p| p.built_at),
                 build_time: previous.as_ref().and_then(|p| p.build_time),
                 refreshing: false,
+                skipped: previous.as_ref().map_or(0, |p| p.skipped),
+                cache_error: previous.as_ref().and_then(|p| p.cache_error.clone()),
             };
             status.insert(drive.letter, st.clone());
 
@@ -117,9 +123,15 @@ impl Indexer {
                 force,
                 has_index: previous.is_some_and(|p| matches!(p.phase, Phase::Ready)),
             };
-            let _ = std::thread::Builder::new()
-                .name(format!("index {}", job.drive.letter))
-                .spawn(move || job.run());
+            let letter = job.drive.letter;
+            if let Err(e) = std::thread::Builder::new()
+                .name(format!("index {letter}"))
+                .spawn(move || job.run())
+                && let Some(s) = status.get_mut(&letter)
+            {
+                // Without this the drive would wait forever.
+                s.phase = Phase::Failed(format!("could not start indexing: {e}"));
+            }
         }
     }
 
@@ -198,6 +210,7 @@ impl Job {
             }
         });
 
+        let skipped = AtomicUsize::new(0);
         let mut result = if use_mft {
             mft::read_volume(letter, &self.progress, &self.total, &self.cancel)
         } else {
@@ -211,14 +224,18 @@ impl Job {
                 }
             });
             let root = PathBuf::from(format!("{letter}:\\"));
-            result = walk::walk_volume(letter, &root, &self.progress, &self.cancel);
+            result = walk::walk_volume(letter, &root, &self.progress, &skipped, &self.cancel);
         }
 
         match result {
             Ok(v) => {
-                let _ = v.save(&cache_path(letter));
+                let cache_error = v.save(&cache_path(letter)).err().map(|e| e.to_string());
                 self.publish(v);
-                self.update(|s| s.refreshing = false);
+                self.update(|s| {
+                    s.refreshing = false;
+                    s.skipped = skipped.load(Ordering::Relaxed);
+                    s.cache_error = cache_error;
+                });
             }
             Err(e) => self.update(|s| {
                 s.refreshing = false;

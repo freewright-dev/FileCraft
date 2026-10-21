@@ -17,10 +17,12 @@ struct Raw {
 
 /// Indexes everything under `root` (normally `X:\`). Ids are handed out by an atomic counter so
 /// workers can enqueue subdirectories with their final id while a single collector fills the table.
+/// Folders and entries that cannot be read are left out and counted in `skipped`.
 pub fn walk_volume(
     letter: char,
     root: &Path,
     progress: &AtomicUsize,
+    skipped: &AtomicUsize,
     cancel: &AtomicBool,
 ) -> anyhow::Result<VolumeIndex> {
     let start = Instant::now();
@@ -54,7 +56,7 @@ pub fn walk_volume(
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
                     if !cancel.load(Ordering::Relaxed) {
-                        let batch = read_one_dir(&dir, dir_id, next_id, pending, &work_tx);
+                        let batch = read_one_dir(&dir, dir_id, next_id, pending, skipped, &work_tx);
                         if !batch.is_empty() {
                             let _ = out_tx.send(batch);
                         }
@@ -84,16 +86,26 @@ fn read_one_dir(
     dir_id: u32,
     next_id: &AtomicU32,
     pending: &AtomicUsize,
+    skipped: &AtomicUsize,
     work_tx: &crossbeam_channel::Sender<(PathBuf, u32)>,
 ) -> Vec<Raw> {
     let Ok(rd) = std::fs::read_dir(dir) else {
+        // The folder itself is indexed; its contents are not.
+        skipped.fetch_add(1, Ordering::Relaxed);
         return Vec::new();
     };
     let mut batch = Vec::new();
-    for entry in rd.flatten() {
+    for entry in rd {
+        let Ok(entry) = entry else {
+            skipped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         // On Windows this metadata comes from the directory listing itself (no extra syscall).
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = entry.metadata() else {
+            skipped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
         let (attrs, size, mtime) = attributes(&meta);
         let idx = next_id.fetch_add(1, Ordering::Relaxed);
         if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
@@ -136,14 +148,27 @@ mod tests {
         std::fs::write(root.join("a").join("one.txt"), "hello").unwrap();
         std::fs::write(root.join("a").join("b").join("two.rs"), "fn main() {}").unwrap();
 
-        let v = walk_volume('T', &root, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let skipped = AtomicUsize::new(0);
+        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicBool::new(false)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(v.len(), 4);
+        assert_eq!(skipped.load(Ordering::Relaxed), 0);
         let two = v.by_name.iter().copied().find(|&i| v.name(i) == "two.rs").unwrap();
         assert_eq!(v.full_path(two), r"T:\a\b\two.rs");
         let a = v.by_name.iter().copied().find(|&i| v.name(i) == "a").unwrap();
         assert_eq!(v.entry(a).size, 17);
+    }
+
+    /// MIN-02: unreadable folders are counted instead of silently missing.
+    #[test]
+    fn unreadable_folders_are_counted() {
+        let (work_tx, _work_rx) = unbounded();
+        let skipped = AtomicUsize::new(0);
+        let missing = std::env::temp_dir().join(format!("filecraft-walk-missing-{}", std::process::id()));
+        let batch = read_one_dir(&missing, 0, &AtomicU32::new(1), &AtomicUsize::new(1), &skipped, &work_tx);
+        assert!(batch.is_empty());
+        assert_eq!(skipped.load(Ordering::Relaxed), 1);
     }
 }
 
@@ -161,7 +186,7 @@ mod bench {
         let root = std::env::var("FILECRAFT_BENCH_ROOT").unwrap_or_else(|_| r"D:\".into());
         let letter = root.chars().next().unwrap().to_ascii_uppercase();
         let t = Instant::now();
-        let v = walk_volume(letter, Path::new(&root), &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let v = walk_volume(letter, Path::new(&root), &AtomicUsize::new(0), &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
         eprintln!("walk: {} entries in {:.2?} (build incl. sorting {:.2?})", v.len(), t.elapsed(), v.build_time);
 
         let path = std::env::temp_dir().join("filecraft-bench.idx");

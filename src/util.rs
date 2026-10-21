@@ -50,10 +50,19 @@ pub fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
     let y: i64 = parts.next()?.parse().ok()?;
     let m: u32 = parts.next()?.parse().ok()?;
     let d: u32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1601..=9999).contains(&y) {
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1601..=9999).contains(&y) || d == 0 || d > days_in_month(y, m) {
         return None;
     }
     Some((y, m, d))
+}
+
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Howard Hinnant's days-from-civil (days since 1970-01-01).
@@ -140,5 +149,13 @@ mod tests {
         assert_eq!(civil_from_days(days_from_civil(2024, 2, 29)), (2024, 2, 29));
         assert_eq!(parse_date("2024-02-29"), Some((2024, 2, 29)));
         assert_eq!(parse_date("2024-13-01"), None);
+        // MIN-02: impossible days used to roll over into the next month.
+        assert_eq!(parse_date("2026-02-31"), None);
+        assert_eq!(parse_date("2026-02-29"), None);
+        assert_eq!(parse_date("2026-04-31"), None);
+        assert_eq!(parse_date("2026-12-31"), Some((2026, 12, 31)));
+        assert_eq!(parse_date("1900-02-29"), None);
+        assert_eq!(parse_date("2000-02-29"), Some((2000, 2, 29)));
+        assert_eq!(parse_date("2026-01-00"), None);
     }
 }

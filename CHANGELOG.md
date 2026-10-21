@@ -53,6 +53,14 @@ All notable changes to this project are documented here. The format follows
   turned into a network path. Images are now read and decoded on the preview thread within byte,
   size and memory limits, show only their first frame, are scaled down to fit the pane, and their
   texture is freed with the preview. egui's whole-file image loaders are no longer installed (FC-08).
+- Small correctness fixes (MIN-02):
+  - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
+  - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor
+    says which ending saving will use, and it is the more common one rather than CRLF whenever
+    any line had it.
+  - A drive whose indexing thread cannot start shows as failed instead of waiting forever.
+  - The drive indicator's hover text reports items a folder scan could not read and cache-save
+    errors, which were discarded before.
 
 ### Security
 

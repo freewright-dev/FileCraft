@@ -15,7 +15,8 @@ like [Everything](https://www.voidtools.com/). Start `FileCraft.exe`; there are 
   for binary files, or a folder's contents. Drag its left edge to resize it.
 - **Status bar** — number of results, search time, and one indicator per drive:
   `…` waiting, `45%` reading the MFT, `1,234,567` entries found by a folder scan so far,
-  `✔` ready, `⟳` refreshing in the background, `✖` failed (hover for details).
+  `✔` ready, `⟳` refreshing in the background, `✖` failed (hover for details). The hover text
+  also says how many items a folder scan could not read, and whether the index could not be cached.
 
 ## Indexing
 
@@ -65,7 +66,9 @@ ICO, WebP) up to 64 MB and 16,384 pixels per side are shown scaled to fit; anima
 first frame.
 
 - **✏ Edit** (or F4) turns the preview into an editor for files up to 8 MB that are UTF-8 text.
-  **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept.
+  **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept. A file
+  that mixes `CRLF` and `LF` shows a notice while editing: saving uses its more common ending for
+  every line.
   A file longer than the preview is first read in full in the background, and editing starts
   when that is done. If it has grown past 8 MB by then, editing is refused.
 - If the file was changed, replaced or deleted on disk after you started editing, saving stops
