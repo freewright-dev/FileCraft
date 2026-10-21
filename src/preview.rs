@@ -184,6 +184,10 @@ impl Preview {
     }
 
     pub fn begin_edit(&mut self) -> Result<(), String> {
+        // Already editing (context menu or F4 again): keep the buffer; only Reload discards it.
+        if self.editing {
+            return Ok(());
+        }
         if let Some(reason) = &self.not_editable {
             return Err(format!("Cannot edit inline: {reason}"));
         }
@@ -304,6 +308,23 @@ mod tests {
         p.dirty = true;
         assert!(p.save(false).is_ok());
         assert_eq!(fs::read(&path).unwrap(), b"\xEF\xBB\xBFone\r\ntwo\r\nthree\r\n");
+        assert!(!p.dirty);
+    }
+
+    /// FC-03: starting an edit again on the same file must not reset unsaved work.
+    #[test]
+    fn re_entering_edit_keeps_unsaved_work() {
+        let path = temp("reenter.txt", b"original");
+        let mut p = Preview::load(&path, false);
+        p.begin_edit().unwrap();
+        p.buffer = "unsaved work".into();
+        p.dirty = true;
+        p.begin_edit().unwrap();
+        assert_eq!(p.buffer, "unsaved work");
+        assert!(p.dirty && p.editing);
+        p.cancel_edit();
+        p.begin_edit().unwrap();
+        assert_eq!(p.buffer, "original");
         assert!(!p.dirty);
     }
 

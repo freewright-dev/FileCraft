@@ -29,6 +29,11 @@ All notable changes to this project are documented here. The format follows
   search options persist between sessions.
 - User guide, architecture notes and an opt-in benchmark (`FILECRAFT_BENCH_ROOT`).
 
+### Fixed
+
+- Choosing *Edit in preview pane* or pressing F4 again while already editing no longer resets the
+  buffer and silently discards unsaved changes (FC-03).
+
 ### Security
 
 - External editor launches no longer go through `cmd /C`, so shell syntax in a file name (such as
