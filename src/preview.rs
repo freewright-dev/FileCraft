@@ -6,6 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use eframe::egui;
 
 /// Bytes shown when previewing (not editing) a text file.
 const PREVIEW_BYTES: usize = 512 * 1024;
@@ -13,6 +14,14 @@ const PREVIEW_BYTES: usize = 512 * 1024;
 pub const EDIT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const DIR_LIMIT: usize = 1000;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "ico", "webp"];
+/// Largest image file that is previewed.
+const IMAGE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest image width or height that is decoded.
+const IMAGE_MAX_SIDE: u32 = 16_384;
+/// Most memory the decoder may allocate (about 64 megapixels as RGBA).
+const IMAGE_MAX_ALLOC: u64 = 256 * 1024 * 1024;
+/// Decoded images are scaled down to fit this square before they reach the UI.
+const IMAGE_PREVIEW_SIDE: u32 = 2048;
 
 pub enum Content {
     Text {
@@ -20,10 +29,17 @@ pub enum Content {
         /// Only the first [`PREVIEW_BYTES`] were read.
         truncated: bool,
     },
-    Image(String),
+    Image(ImagePreview),
     Binary(String),
     Directory { entries: Vec<(bool, String)>, total: usize },
     Message(String),
+}
+
+/// An image decoded on the preview thread (first frame only, scaled to fit the pane). The UI
+/// turns the pixels into a texture, which is freed together with the preview.
+pub struct ImagePreview {
+    pub pixels: Option<egui::ColorImage>,
+    pub texture: Option<egui::TextureHandle>,
 }
 
 pub enum SaveError {
@@ -231,7 +247,10 @@ impl Preview {
         let ext = self.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             self.not_editable = Some("image".into());
-            return Content::Image(format!("file://{}", self.path.display()));
+            return match load_image(&self.path) {
+                Ok(pixels) => Content::Image(ImagePreview { pixels: Some(pixels), texture: None }),
+                Err(e) => Content::Message(format!("Cannot show image: {e}")),
+            };
         }
 
         // One byte more than is shown tells whether the file is longer, whatever `meta` says now.
@@ -363,6 +382,30 @@ impl Preview {
         Ok(())
     }
 
+}
+
+/// Reads and decodes an image within byte, size and memory budgets. Only the first frame of an
+/// animation is decoded, and the result is scaled down to [`IMAGE_PREVIEW_SIDE`].
+fn load_image(path: &Path) -> Result<egui::ColorImage, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    (&file).take(IMAGE_MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > IMAGE_MAX_BYTES {
+        return Err(format!("larger than {} MB", IMAGE_MAX_BYTES / (1024 * 1024)));
+    }
+    let mut reader = image::ImageReader::new(io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(IMAGE_MAX_SIDE);
+    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
+    reader.limits(limits);
+    let mut image = reader.decode().map_err(|e| e.to_string())?;
+    if image.width().max(image.height()) > IMAGE_PREVIEW_SIDE {
+        image = image.thumbnail(IMAGE_PREVIEW_SIDE, IMAGE_PREVIEW_SIDE);
+    }
+    let rgba = image.into_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
 /// Offline or recall-on-access files (cloud placeholders) would be downloaded by reading them.
@@ -645,14 +688,48 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbaImage::new(width, height)
+            .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
     #[test]
     fn binary_and_images_are_not_editable() {
         let bin = temp("data.bin", &[0, 1, 2, 3, 255]);
         let p = Preview::load(&bin, false);
         assert!(matches!(p.content, Content::Binary(_)));
         assert!(!p.can_edit());
-        let img = temp("pic.png", b"not really a png");
-        assert!(matches!(Preview::load(&img, false).content, Content::Image(_)));
+        let img = temp("pic.png", &png(2, 2));
+        let p = Preview::load(&img, false);
+        assert!(matches!(p.content, Content::Image(_)));
+        assert!(!p.can_edit());
+    }
+
+    /// FC-08: images are read from the local path (no `file://` URI that the loader turned into
+    /// a network path), decoded on the preview thread and scaled down for the pane.
+    #[test]
+    fn images_are_decoded_locally_and_scaled() {
+        // `#`, spaces and non-ASCII characters broke URI-based loading.
+        let path = temp("wide #1 ünïcode.png", &png(4096, 1024));
+        match Preview::load(&path, false).content {
+            Content::Image(ImagePreview { pixels: Some(pixels), .. }) => assert_eq!(pixels.size, [2048, 512]),
+            _ => panic!("expected a decoded image"),
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn oversized_or_broken_images_are_not_decoded() {
+        let broken = temp("broken.png", b"not really a png");
+        assert!(matches!(Preview::load(&broken, false).content, Content::Message(m) if m.starts_with("Cannot show image")));
+        // A PNG header claiming more pixels than the side limit is refused before decoding.
+        let huge = temp("huge.png", &png(IMAGE_MAX_SIDE + 1, 1));
+        assert!(matches!(Preview::load(&huge, false).content, Content::Message(m) if m.starts_with("Cannot show image")));
+        fs::remove_file(broken).unwrap();
+        fs::remove_file(huge).unwrap();
     }
 
     #[test]
@@ -695,7 +772,7 @@ mod tests {
         use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_OFFLINE, SetFileAttributesW};
 
         let text = temp("offline.txt", b"local text");
-        let image = temp("offline.png", b"image bytes");
+        let image = temp("offline.png", &png(1, 1));
         let folder = text.parent().unwrap().join("offline-folder");
         fs::create_dir_all(&folder).unwrap();
         fs::write(folder.join("child.txt"), b"child").unwrap();

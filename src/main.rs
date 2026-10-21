@@ -27,7 +27,6 @@ fn main() -> eframe::Result {
         "FileCraft",
         options,
         Box::new(|cc| {
-            egui_extras::install_image_loaders(&cc.egui_ctx);
             #[cfg(windows)]
             set_taskbar_icon(cc);
             Ok(Box::new(app::FileCraftApp::new(cc)))

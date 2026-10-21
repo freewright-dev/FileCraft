@@ -845,7 +845,7 @@ impl FileCraftApp {
                     self.editor_focused = resp.has_focus();
                 });
             } else {
-                show_content(ui, &p.content);
+                show_content(ui, &mut p.content);
             }
         } else if self.preview_request.is_some() {
             ui.weak("Loading preview…");
@@ -1050,8 +1050,14 @@ impl FileCraftApp {
     }
 }
 
-fn show_content(ui: &mut egui::Ui, content: &Content) {
-    match content {
+fn show_content(ui: &mut egui::Ui, content: &mut Content) {
+    // Uploaded once; the texture is freed when the preview is replaced.
+    if let Content::Image(image) = content
+        && let Some(pixels) = image.pixels.take()
+    {
+        image.texture = Some(ui.ctx().load_texture("preview-image", pixels, egui::TextureOptions::LINEAR));
+    }
+    match &*content {
         Content::Text { text, truncated } => {
             if *truncated {
                 ui.weak("Showing the beginning of the file.");
@@ -1061,15 +1067,12 @@ fn show_content(ui: &mut egui::Ui, content: &Content) {
                 ui.add(egui::TextEdit::multiline(&mut view).code_editor().desired_width(f32::INFINITY));
             });
         }
-        Content::Image(uri) => {
-            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                ui.add(
-                    egui::Image::new(uri.as_str())
-                        .max_size(ui.available_size())
-                        .maintain_aspect_ratio(true)
-                        .show_loading_spinner(true),
-                );
-            });
+        Content::Image(image) => {
+            if let Some(texture) = &image.texture {
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    ui.add(egui::Image::new(texture).max_size(ui.available_size()).maintain_aspect_ratio(true));
+                });
+            }
         }
         Content::Binary(dump) => {
             ui.weak("Binary file");

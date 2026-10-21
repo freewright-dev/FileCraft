@@ -49,6 +49,10 @@ All notable changes to this project are documented here. The format follows
   were dropped and the rest attached to the drive root, so open, edit and save could act on a
   different file. Path sorting and folder sizes use the full depth too, the NTFS index no longer
   skips such files, and caches whose entries do not all reach the root are rejected (FC-06).
+- Image previews work on local drives. They used a malformed `file://D:\…` URI that egui's loader
+  turned into a network path. Images are now read and decoded on the preview thread within byte,
+  size and memory limits, show only their first frame, are scaled down to fit the pane, and their
+  texture is freed with the preview. egui's whole-file image loaders are no longer installed (FC-08).
 
 ### Security
 
