@@ -45,6 +45,10 @@ All notable changes to this project are documented here. The format follows
 - Editing a file longer than its preview no longer reads it on the UI thread without a limit.
   The whole file is read on the preview thread, never more than 8 MB, even if it grew after it
   was previewed, and only if it is still a regular file available locally (FC-05).
+- Files nested more than 512 folders deep now get their real full path. Before, the top folders
+  were dropped and the rest attached to the drive root, so open, edit and save could act on a
+  different file. Path sorting and folder sizes use the full depth too, the NTFS index no longer
+  skips such files, and caches whose entries do not all reach the root are rejected (FC-06).
 
 ### Security
 

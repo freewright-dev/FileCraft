@@ -9,7 +9,6 @@ const ROOT_RECORD: usize = 5;
 /// Records below this number are NTFS metadata files ($MFT, $LogFile, $Extend, …).
 const FIRST_USER_RECORD: usize = 16;
 const READ_CHUNK: usize = 4 << 20;
-const MAX_DEPTH: usize = 512;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
@@ -346,7 +345,9 @@ fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> VolumeIndex
         while state[cur] == UNKNOWN {
             let r = &recs[cur];
             let parent = r.parent as usize;
-            if !r.in_use || !r.has_name || cur < FIRST_USER_RECORD || parent >= n || stack.len() > MAX_DEPTH {
+            // No depth limit: a loop ends at a VISITING record and is rejected, so deep folders
+            // are indexed like the folder scan does instead of being dropped.
+            if !r.in_use || !r.has_name || cur < FIRST_USER_RECORD || parent >= n {
                 state[cur] = INVALID;
                 break;
             }
