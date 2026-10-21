@@ -19,6 +19,8 @@ const KEY_MAX_AGE: &str = "reindex_after_minutes";
 const KEY_PREVIEW: &str = "show_preview";
 const KEY_OPTIONS: &str = "search_options";
 const KEY_SORT: &str = "sort";
+/// Upper end of the "re-index when older than" setting: one week.
+const MAX_AGE_LIMIT_MINUTES: u64 = 10_080;
 
 enum Pending {
     Select(usize),
@@ -85,7 +87,8 @@ impl FileCraftApp {
         let get = |key: &str| cc.storage.and_then(|s| s.get_string(key));
         let editor = get(KEY_EDITOR).filter(|s| !s.trim().is_empty()).unwrap_or_else(actions::default_editor);
         let excluded: BTreeSet<char> = get(KEY_EXCLUDED).unwrap_or_default().chars().filter(char::is_ascii_uppercase).collect();
-        let max_age_minutes = get(KEY_MAX_AGE).and_then(|s| s.parse().ok()).unwrap_or(60);
+        // Clamped like the settings field, so an edited value cannot overflow the duration.
+        let max_age_minutes = get(KEY_MAX_AGE).and_then(|s| s.parse().ok()).unwrap_or(60).min(MAX_AGE_LIMIT_MINUTES);
         let show_preview = get(KEY_PREVIEW).is_none_or(|s| s == "1");
         let flags = get(KEY_OPTIONS).unwrap_or_default();
         let options = SearchOptions {
@@ -968,7 +971,7 @@ impl FileCraftApp {
                 ui.strong("Index");
                 ui.horizontal(|ui| {
                     ui.label("Re-index on startup when older than");
-                    ui.add(egui::DragValue::new(&mut self.max_age_minutes).range(0..=10_080).suffix(" min"));
+                    ui.add(egui::DragValue::new(&mut self.max_age_minutes).range(0..=MAX_AGE_LIMIT_MINUTES).suffix(" min"));
                 });
                 ui.weak(format!("Cache: {}", data_dir().join("index").display()));
                 if ui.button("Delete cached indexes").clicked() {
