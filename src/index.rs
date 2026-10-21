@@ -16,7 +16,16 @@ pub const ATTR_SYSTEM: u32 = 0x4;
 pub const ATTR_DIRECTORY: u32 = 0x10;
 pub const ATTR_REPARSE_POINT: u32 = 0x400;
 
-const MAX_DEPTH: usize = 512;
+/// Path depth that [`VolumeIndex::write_path`] handles without allocating.
+const CHAIN_STACK: usize = 512;
+
+/// `idx` and its ancestors up to, but not including, the root. The count bound only matters if
+/// the links were corrupt; it stops a loop rather than truncating a valid path.
+fn ancestors(entries: &[Entry], idx: u32) -> impl Iterator<Item = u32> + '_ {
+    std::iter::successors(Some(idx), |&i| Some(entries[i as usize].parent))
+        .take_while(|&i| i != 0 && i != NONE)
+        .take(entries.len())
+}
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Entry {
@@ -95,22 +104,30 @@ impl VolumeIndex {
         arena_str(&self.lower, e.lower_off, e.lower_len).unwrap_or("")
     }
 
-    /// Appends the full path of `idx` (e.g. `C:\Users\me\file.txt`) to `buf`.
+    /// Appends the full path of `idx` (e.g. `C:\Users\me\file.txt`) to `buf`, however deep.
+    /// Parent links are acyclic and end at the root (checked when a cache is loaded).
     pub fn write_path(&self, idx: u32, buf: &mut String, lowercase: bool) {
-        let mut chain = [0u32; MAX_DEPTH];
+        let mut stack = [0u32; CHAIN_STACK];
         let mut depth = 0;
         let mut cur = idx;
-        while cur != 0 && cur != NONE && depth < MAX_DEPTH {
-            chain[depth] = cur;
+        while cur != 0 && cur != NONE && depth < CHAIN_STACK {
+            stack[depth] = cur;
             depth += 1;
             cur = self.entries[cur as usize].parent;
         }
+        // Deeper paths are rare: continue the chain on the heap instead of cutting it short.
+        let mut heap = Vec::new();
+        if cur != 0 && cur != NONE {
+            heap.extend_from_slice(&stack);
+            heap.extend(ancestors(&self.entries, cur));
+        }
+        let chain = if heap.is_empty() { &stack[..depth] } else { &heap[..] };
         buf.push(if lowercase { self.letter.to_ascii_lowercase() } else { self.letter });
         buf.push(':');
-        if depth == 0 {
+        if chain.is_empty() {
             buf.push('\\');
         }
-        for &id in chain[..depth].iter().rev() {
+        for &id in chain.iter().rev() {
             buf.push('\\');
             buf.push_str(if lowercase { self.lower_name(id) } else { self.name(id) });
         }
@@ -360,13 +377,15 @@ fn compute_folder_sizes(entries: &mut [Entry]) {
         if e.is_dir() || e.size == 0 || e.parent == NONE {
             continue;
         }
+        // Every ancestor, however deep; the count bound only stops corrupt (looping) links.
         let mut p = e.parent;
-        let mut guard = 0;
-        while p != NONE && guard < MAX_DEPTH {
+        for _ in 0..entries.len() {
+            if p == NONE {
+                break;
+            }
             let parent = &mut entries[p as usize];
             parent.size += e.size;
             p = parent.parent;
-            guard += 1;
         }
     }
 }
@@ -378,12 +397,7 @@ fn directory_ranks<'a>(entries: &[Entry], letter: char, lower_of: &(impl Fn(u32)
         if !e.is_dir() || (i != 0 && e.parent == NONE) {
             continue;
         }
-        let mut chain = Vec::new();
-        let mut cur = i as u32;
-        while cur != 0 && cur != NONE && chain.len() < MAX_DEPTH {
-            chain.push(cur);
-            cur = entries[cur as usize].parent;
-        }
+        let chain: Vec<u32> = ancestors(entries, i as u32).collect();
         let mut path = String::with_capacity(64);
         path.push(letter.to_ascii_lowercase());
         path.push(':');
@@ -577,7 +591,7 @@ impl VolumeIndex {
         if entries[0].parent != NONE || !entries[0].is_dir() {
             return Err(invalid("bad root entry"));
         }
-        check_acyclic(&entries)?;
+        check_tree(&entries)?;
 
         // Each order lists every entry that has a parent (so not the root) exactly once.
         let listed = entries.iter().skip(1).filter(|e| e.parent != NONE).count();
@@ -642,25 +656,35 @@ fn read_with_budget(path: &Path, budget: u64) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Rejects parent links that loop instead of ending at an entry without a parent.
-fn check_acyclic(entries: &[Entry]) -> io::Result<()> {
+/// Requires every entry with a parent to reach the root (entry 0) through its parent links:
+/// no loops, and no ancestor that is an unused slot (no parent, but not the root). Paths can
+/// then always be rebuilt in full rather than silently attached to the drive root.
+fn check_tree(entries: &[Entry]) -> io::Result<()> {
     const UNCHECKED: u8 = 0;
     const ON_CHAIN: u8 = 1;
-    const ENDS: u8 = 2;
+    const ROOTED: u8 = 2;
+    const UNUSED: u8 = 3;
     let mut state = vec![UNCHECKED; entries.len()];
     let mut chain = Vec::new();
     for start in 0..entries.len() as u32 {
         let mut cur = start;
-        while cur != NONE && state[cur as usize] == UNCHECKED {
+        while state[cur as usize] == UNCHECKED {
+            let parent = entries[cur as usize].parent;
+            if parent == NONE {
+                state[cur as usize] = if cur == 0 { ROOTED } else { UNUSED };
+                break;
+            }
             state[cur as usize] = ON_CHAIN;
             chain.push(cur);
-            cur = entries[cur as usize].parent;
+            cur = parent;
         }
-        if cur != NONE && state[cur as usize] == ON_CHAIN {
-            return Err(invalid("parent links form a loop"));
+        match state[cur as usize] {
+            ON_CHAIN => return Err(invalid("parent links form a loop")),
+            UNUSED if !chain.is_empty() => return Err(invalid("entry is not attached to the root")),
+            _ => {}
         }
         for id in chain.drain(..) {
-            state[id as usize] = ENDS;
+            state[id as usize] = ROOTED;
         }
     }
     Ok(())
@@ -762,7 +786,10 @@ pub mod tests {
     }
 
     fn cache_bytes(v: &VolumeIndex) -> Vec<u8> {
-        let path = std::env::temp_dir().join(format!("filecraft-test-bytes-{}.idx", std::process::id()));
+        // Tests run in parallel, so every call gets its own file.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("filecraft-test-bytes-{}-{n}.idx", std::process::id()));
         v.save(&path).unwrap();
         let bytes = fs::read(&path).unwrap();
         let _ = fs::remove_file(&path);
@@ -813,5 +840,38 @@ pub mod tests {
         let second_id = u32::from_le_bytes(good[orders_at + 12..orders_at + 16].try_into().unwrap());
         load_error("duplicate-order-id", &patch(orders_at + 8, second_id), 'C');
         load_error("order-lists-root", &patch(orders_at + 8, 0), 'C');
+    }
+
+    /// FC-06: a path deeper than 512 levels used to lose its top folders and hang off the root.
+    #[test]
+    fn deep_paths_are_rebuilt_in_full() {
+        let mut b = VolumeBuilder::new('C');
+        let mut parent = 0;
+        for _ in 0..513 {
+            parent = b.push("d", parent, ATTR_DIRECTORY, 0, 0);
+        }
+        let file = b.push("victim.txt", parent, 0, 7, 0);
+        let v = b.finish(Source::Walk, Duration::ZERO);
+
+        let expected = format!(r"C:{}\victim.txt", r"\d".repeat(513));
+        assert_eq!(v.full_path(file), expected);
+        assert_eq!(v.parent_path(file), format!("C:{}", r"\d".repeat(513)));
+        assert_eq!(v.entry(0).size, 7, "folder sizes reach the root");
+        assert_eq!(v.by_path, (1..=file).collect::<Vec<_>>());
+
+        let path = std::env::temp_dir().join(format!("filecraft-test-deep-{}.idx", std::process::id()));
+        v.save(&path).unwrap();
+        let loaded = VolumeIndex::load(&path, 'C');
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.unwrap().full_path(file), expected);
+    }
+
+    #[test]
+    fn entries_detached_from_the_root_are_rejected() {
+        let mut b = VolumeBuilder::new('C');
+        // Slots 1 and 2 stay unused, so the file's parent is not a real folder.
+        b.set(3, "orphan.txt", 2, 0, 1, 0);
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        load_error("detached", &cache_bytes(&v), 'C');
     }
 }

@@ -54,7 +54,9 @@ before the index is used:
 - the drive letter matches the drive being loaded;
 - the source byte and build timestamp are valid;
 - every name range lies inside its arena on character boundaries;
-- parent ids are in range, entry 0 is a root folder, and parent links contain no loops;
+- parent ids are in range, entry 0 is a root folder, and every entry with a parent reaches
+  the root through its parent links (no loops, no unused slot along the way), so full paths are
+  always rebuilt completely, at any depth;
 - each sort order lists every entry with a parent exactly once;
 - no bytes are left over.
 
