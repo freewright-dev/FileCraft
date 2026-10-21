@@ -9,6 +9,11 @@ const ROOT_RECORD: usize = 5;
 /// Records below this number are NTFS metadata files ($MFT, $LogFile, $Extend, …).
 const FIRST_USER_RECORD: usize = 16;
 const READ_CHUNK: usize = 4 << 20;
+/// Fixed FILE record header (through the record number at 0x2C); shorter records are rejected.
+const RECORD_HEADER_LEN: usize = 0x30;
+/// Most $MFT records read (about 2.5 GB of record state). Bigger volumes fall back to the
+/// folder scan instead of allocating without a bound.
+const MAX_MFT_RECORDS: u64 = 64 << 20;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_FILE_NAME: u32 = 0x30;
@@ -51,30 +56,42 @@ pub fn read_volume(
         .open(format!(r"\\.\{letter}:"))?;
     let info = volume_data(&volume)?;
 
+    let geometry = || anyhow::anyhow!("unsupported NTFS geometry");
     let cluster = info.BytesPerCluster as u64;
     let record_size = info.BytesPerFileRecordSegment as usize;
-    if record_size == 0 || cluster == 0 || !READ_CHUNK.is_multiple_of(record_size) {
-        anyhow::bail!("unsupported NTFS geometry");
+    let total_clusters = u64::try_from(info.TotalClusters).map_err(|_| geometry())?;
+    if record_size < RECORD_HEADER_LEN || cluster == 0 || !READ_CHUNK.is_multiple_of(record_size) {
+        return Err(geometry());
     }
+    let volume_bytes = total_clusters.checked_mul(cluster).ok_or_else(geometry)?;
+    let mft_start = u64::try_from(info.MftStartLcn).ok().filter(|&lcn| lcn < total_clusters).ok_or_else(geometry)?;
+    let mft_bytes = u64::try_from(info.MftValidDataLength).ok().filter(|&n| n <= volume_bytes).ok_or_else(geometry)?;
 
     let mut rec0 = vec![0u8; record_size];
-    read_exact_at(&volume, &mut rec0, info.MftStartLcn as u64 * cluster)?;
+    read_exact_at(&volume, &mut rec0, mft_start * cluster)?;
     if !apply_fixup(&mut rec0) {
         anyhow::bail!("corrupt $MFT record");
     }
-    let runs = mft_runs(&rec0).ok_or_else(|| anyhow::anyhow!("cannot locate $MFT data runs"))?;
+    let runs = mft_runs(&rec0, total_clusters).ok_or_else(|| anyhow::anyhow!("cannot locate valid $MFT data runs"))?;
 
-    let record_count = (info.MftValidDataLength as u64 / record_size as u64) as usize;
+    let record_count = mft_bytes / record_size as u64;
+    if record_count > MAX_MFT_RECORDS {
+        anyhow::bail!("$MFT has more than {MAX_MFT_RECORDS} records");
+    }
+    let record_count = record_count as usize;
     total.store(record_count, Ordering::Relaxed);
     let mut recs = vec![Rec::default(); record_count];
     let mut names = String::with_capacity(record_count * 16);
     let mut buf = vec![0u8; READ_CHUNK];
     let mut frn = 0usize;
 
+    // `mft_runs` keeps every run inside the volume, so these byte offsets cannot overflow.
     for (lcn, clusters) in runs {
         let mut remaining = clusters * cluster;
         let Some(lcn) = lcn else {
-            frn += (remaining / record_size as u64) as usize; // sparse run: no records stored
+            // Sparse run: no records stored.
+            let skipped = usize::try_from(remaining / record_size as u64).unwrap_or(usize::MAX);
+            frn = frn.saturating_add(skipped).min(record_count);
             continue;
         };
         let mut offset = lcn * cluster;
@@ -84,7 +101,7 @@ pub fn read_volume(
             }
             let want = remaining
                 .min(READ_CHUNK as u64)
-                .min(((record_count - frn) * record_size) as u64) as usize;
+                .min((record_count - frn) as u64 * record_size as u64) as usize;
             read_exact_at(&volume, &mut buf[..want], offset)?;
             for record in buf[..want].chunks_exact_mut(record_size) {
                 parse_record(record, frn, &mut recs, &mut names);
@@ -130,6 +147,9 @@ fn volume_data(
     };
     if ok == 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    if (returned as usize) < size_of::<NTFS_VOLUME_DATA_BUFFER>() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short NTFS volume data"));
     }
     Ok(out)
 }
@@ -219,7 +239,8 @@ fn resident_value(attr: &[u8]) -> Option<&[u8]> {
 }
 
 fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut String) {
-    if !apply_fixup(record) {
+    // The flags (0x16) and base reference (0x20) below must lie inside the record.
+    if record.len() < RECORD_HEADER_LEN || !apply_fixup(record) {
         return;
     }
     let flags = u16_at(record, 0x16);
@@ -261,6 +282,9 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
                 let name = String::from_utf16_lossy(&units);
+                if names.len() + name.len() > u32::MAX as usize {
+                    continue; // name offsets are 32-bit
+                }
                 rec.name_off = names.len() as u32;
                 rec.name_len = name.len().min(u16::MAX as usize) as u16;
                 names.push_str(&name);
@@ -284,8 +308,9 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
 }
 
 /// Decodes the data runs of the unnamed $DATA attribute in $MFT's own record:
-/// `(starting LCN or None when sparse, length in clusters)`.
-fn mft_runs(rec0: &[u8]) -> Option<Vec<(Option<u64>, u64)>> {
+/// `(starting LCN or None when sparse, length in clusters)`. Fails on an empty run, a negative or
+/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters`.
+fn mft_runs(rec0: &[u8], total_clusters: u64) -> Option<Vec<(Option<u64>, u64)>> {
     let (_, attr) = attributes(rec0).find(|(ty, a)| *ty == ATTR_DATA && a[8] != 0 && a[9] == 0)?;
     if attr.len() < 0x22 {
         return None;
@@ -309,6 +334,9 @@ fn mft_runs(rec0: &[u8]) -> Option<Vec<(Option<u64>, u64)>> {
             length |= (attr[pos + i] as u64) << (8 * i);
         }
         pos += len_size;
+        if length == 0 {
+            return None;
+        }
         if off_size == 0 {
             runs.push((None, length));
         } else {
@@ -319,8 +347,12 @@ fn mft_runs(rec0: &[u8]) -> Option<Vec<(Option<u64>, u64)>> {
             // Sign-extend the variable-width delta.
             let shift = 64 - 8 * off_size as u32;
             delta = (delta << shift) >> shift;
-            lcn += delta;
-            runs.push((Some(lcn as u64), length));
+            lcn = lcn.checked_add(delta)?;
+            let start = u64::try_from(lcn).ok()?;
+            if start.checked_add(length)? > total_clusters {
+                return None;
+            }
+            runs.push((Some(start), length));
         }
         pos += off_size;
     }
@@ -474,8 +506,43 @@ mod tests {
         let runs = [0x21, 0x20, 0x00, 0x10, 0x21, 0x10, 0x00, 0xFF, 0x01, 0x08];
         let mut rec = record(RECORD_IN_USE, 0, &[non_resident_data(0, &runs)]);
         assert!(apply_fixup(&mut rec));
-        let decoded = mft_runs(&rec).unwrap();
+        let decoded = mft_runs(&rec, 0x2000).unwrap();
         assert_eq!(decoded, vec![(Some(0x1000), 0x20), (Some(0x0F00), 0x10), (None, 8)]);
+    }
+
+    /// FC-10: invalid run geometry fails closed instead of wrapping or panicking.
+    #[test]
+    fn rejects_invalid_data_runs() {
+        let runs = |bytes: &[u8], total_clusters: u64| {
+            let mut rec = record(RECORD_IN_USE, 0, &[non_resident_data(0, bytes)]);
+            assert!(apply_fixup(&mut rec));
+            mft_runs(&rec, total_clusters)
+        };
+        // A negative LCN used to become u64::MAX.
+        assert_eq!(runs(&[0x11, 0x01, 0xFF], 0x2000), None);
+        // i64::MAX then +1 used to overflow (a panic with overflow checks).
+        let mut overflow = vec![0x81, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F];
+        overflow.extend([0x11, 0x01, 0x01]);
+        assert_eq!(runs(&overflow, u64::MAX), None);
+        // Zero-length run.
+        assert_eq!(runs(&[0x11, 0x00, 0x05], 0x2000), None);
+        // 0x20 clusters at LCN 0x1000 do not fit a volume of 0x1010 clusters.
+        assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1010), None);
+        assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1020), Some(vec![(Some(0x1000), 0x20)]));
+    }
+
+    /// FC-10: a record shorter than the fixed header is ignored rather than read out of bounds.
+    #[test]
+    fn short_records_are_ignored() {
+        let mut short = vec![0u8; 0x20];
+        short[0..4].copy_from_slice(b"FILE");
+        short[4..6].copy_from_slice(&8u16.to_le_bytes());
+        short[6..8].copy_from_slice(&2u16.to_le_bytes());
+        short[0x16..0x18].copy_from_slice(&RECORD_IN_USE.to_le_bytes()); // so the base reference at 0x20 is read
+        short[0x1E..0x20].copy_from_slice(&[0, 0]); // matches the zero sequence number at 8
+        let mut recs = vec![Rec::default(); 4];
+        parse_record(&mut short, 1, &mut recs, &mut String::new());
+        assert!(!recs[1].in_use);
     }
 
     #[test]

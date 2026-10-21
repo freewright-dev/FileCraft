@@ -61,6 +61,10 @@ All notable changes to this project are documented here. The format follows
   - A drive whose indexing thread cannot start shows as failed instead of waiting forever.
   - The drive indicator's hover text reports items a folder scan could not read and cache-save
     errors, which were discarded before.
+- The NTFS reader rejects invalid `$MFT` data runs (a negative LCN read as `u64::MAX`, overflowing
+  or zero-length runs, runs past the end of the volume) and inconsistent volume geometry, and caps
+  the record count at 64 Mi. It falls back to the folder scan instead of reading wrong offsets or
+  panicking. Records shorter than the fixed header are skipped instead of read out of bounds (FC-10).
 
 ### Security
 
