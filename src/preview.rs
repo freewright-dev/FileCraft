@@ -1,9 +1,10 @@
 //! Preview pane content and in-place text editing.
 
 use std::fs;
-use std::io::Read;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 /// Bytes shown when previewing (not editing) a text file.
@@ -26,9 +27,47 @@ pub enum Content {
 }
 
 pub enum SaveError {
-    /// The file was modified on disk after it was loaded.
+    /// The file was modified, replaced or deleted on disk after it was loaded.
     Conflict,
     Io(String),
+}
+
+/// Which file was loaded and what it contained; a save compares this with the file on disk.
+/// Modification times are not enough: they can be preserved or reset by other programs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileVersion {
+    /// Volume and file index (device and inode elsewhere): a replaced file gets a new one.
+    id: (u64, u64),
+    hash: u64,
+}
+
+impl FileVersion {
+    fn of(file: &fs::File, bytes: &[u8]) -> io::Result<FileVersion> {
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Ok(FileVersion { id: file_id(file)?, hash: hasher.finish() })
+    }
+}
+
+fn file_id(file: &fs::File) -> io::Result<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+        // SAFETY: zero is a valid initial state for this plain struct.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle stays open for the call and `info` is writable.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((u64::from(info.dwVolumeSerialNumber), u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow)))
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok((meta.dev(), meta.ino()))
+    }
 }
 
 pub struct Preview {
@@ -41,7 +80,8 @@ pub struct Preview {
     pub conflict: bool,
     /// Why the file cannot be edited inline, if it cannot.
     pub not_editable: Option<String>,
-    loaded_mtime: Option<SystemTime>,
+    /// The complete file as it was read; `None` until the whole file has been read.
+    loaded: Option<FileVersion>,
     crlf: bool,
     bom: bool,
 }
@@ -103,7 +143,7 @@ impl Preview {
             dirty: false,
             conflict: false,
             not_editable: None,
-            loaded_mtime: None,
+            loaded: None,
             crlf: false,
             bom: false,
         };
@@ -134,7 +174,6 @@ impl Preview {
     }
 
     fn load_file(&mut self, meta: &fs::Metadata) -> Content {
-        self.loaded_mtime = meta.modified().ok();
         let ext = self.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             self.not_editable = Some("image".into());
@@ -142,16 +181,22 @@ impl Preview {
         }
 
         let mut buf = Vec::with_capacity(PREVIEW_BYTES.min(meta.len() as usize));
-        if let Err(e) = fs::File::open(&self.path).and_then(|f| f.take(PREVIEW_BYTES as u64).read_to_end(&mut buf)) {
-            self.not_editable = Some("file not readable".into());
-            return Content::Message(format!("Cannot read file: {e}"));
-        }
+        let file = match fs::File::open(&self.path).and_then(|f| (&f).take(PREVIEW_BYTES as u64).read_to_end(&mut buf).map(|_| f)) {
+            Ok(f) => f,
+            Err(e) => {
+                self.not_editable = Some("file not readable".into());
+                return Content::Message(format!("Cannot read file: {e}"));
+            }
+        };
         if buf.iter().take(8192).any(|&b| b == 0) {
             self.not_editable = Some("binary file".into());
             return Content::Binary(hex_dump(&buf[..buf.len().min(4096)]));
         }
 
         let truncated = (buf.len() as u64) < meta.len();
+        if !truncated {
+            self.loaded = FileVersion::of(&file, &buf).ok();
+        }
         if meta.len() > EDIT_MAX_BYTES {
             self.not_editable = Some(format!("larger than {} MB", EDIT_MAX_BYTES / (1024 * 1024)));
         }
@@ -195,8 +240,10 @@ impl Preview {
             return Err("Only text files can be edited inline".into());
         };
         self.buffer = if *truncated {
-            let bytes = fs::read(&self.path).map_err(|e| e.to_string())?;
-            self.loaded_mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+            let mut bytes = Vec::new();
+            let mut file = fs::File::open(&self.path).map_err(|e| e.to_string())?;
+            file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            self.loaded = Some(FileVersion::of(&file, &bytes).map_err(|e| e.to_string())?);
             let (text, valid) = self.decode(&bytes, false);
             if !valid {
                 return Err("Cannot edit inline: not UTF-8 text".into());
@@ -218,13 +265,11 @@ impl Preview {
         self.buffer.clear();
     }
 
-    /// Writes the edit buffer. Refuses when the file changed on disk unless `force`.
+    /// Writes the edit buffer. Refuses when the file was changed, replaced or deleted on disk
+    /// since it was loaded, unless `force`. The file is checked and written through one handle,
+    /// so swapping the path (rename, link, junction) in between cannot redirect the write.
     pub fn save(&mut self, force: bool) -> Result<(), SaveError> {
-        let current = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
-        if !force && current.is_some() && current != self.loaded_mtime {
-            self.conflict = true;
-            return Err(SaveError::Conflict);
-        }
+        let io_err = |e: io::Error| SaveError::Io(e.to_string());
         let mut out = Vec::with_capacity(self.buffer.len() + 3);
         if self.bom {
             out.extend_from_slice(b"\xEF\xBB\xBF");
@@ -234,9 +279,33 @@ impl Preview {
         } else {
             out.extend_from_slice(self.buffer.as_bytes());
         }
-        fs::write(&self.path, &out).map_err(|e| SaveError::Io(e.to_string()))?;
 
-        self.loaded_mtime = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let file = match open_for_save(&self.path) {
+            Ok(mut file) => {
+                let mut original = Vec::new();
+                file.read_to_end(&mut original).map_err(io_err)?;
+                if !force && self.loaded != Some(FileVersion::of(&file, &original).map_err(io_err)?) {
+                    self.conflict = true;
+                    return Err(SaveError::Conflict);
+                }
+                let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                write_in_place(&mut file, &name, &original, &out, &backup_dir()).map_err(io_err)?;
+                file
+            }
+            // Deleted on disk: only an explicit Overwrite recreates it.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !force => {
+                self.conflict = true;
+                return Err(SaveError::Conflict);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut file = fs::File::options().write(true).create_new(true).open(&self.path).map_err(io_err)?;
+                file.write_all(&out).and_then(|()| file.sync_all()).map_err(io_err)?;
+                file
+            }
+            Err(e) => return Err(io_err(e)),
+        };
+
+        self.loaded = Some(FileVersion::of(&file, &out).map_err(io_err)?);
         self.dirty = false;
         self.conflict = false;
         let truncated = out.len() > PREVIEW_BYTES;
@@ -245,6 +314,77 @@ impl Preview {
         Ok(())
     }
 
+}
+
+/// Opens the existing file for a save. Other programs may still read it, but on Windows they
+/// cannot write, rename or delete it until the save is done.
+fn open_for_save(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::File::options();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
+}
+
+/// Where a save keeps a copy of the original until the new content is completely written.
+fn backup_dir() -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join(format!("filecraft-backup-{}", std::process::id()))
+    } else {
+        crate::index::data_dir().join("backup")
+    }
+}
+
+/// Overwrites `file` with `new` through its open handle, so permissions, attributes and hard
+/// links are kept. `old` is first copied to `backup_dir`; the copy is deleted once the write
+/// completes or `old` has been written back after a failure. Otherwise the error names it.
+fn write_in_place(file: &mut fs::File, name: &str, old: &[u8], new: &[u8], backup_dir: &Path) -> io::Result<()> {
+    let backup = write_backup(backup_dir, name, old)?;
+    match overwrite(file, new) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(e) if overwrite(file, old).is_ok() => {
+            let _ = fs::remove_file(&backup);
+            Err(e)
+        }
+        Err(e) => Err(io::Error::new(e.kind(), format!("{e} (the original is saved as {})", backup.display()))),
+    }
+}
+
+fn write_backup(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    fs::create_dir_all(dir)?;
+    loop {
+        let path = dir.join(format!("{}-{}-{name}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let mut file = match fs::File::options().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+        return Ok(path);
+    }
+}
+
+fn overwrite(file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+    let len = bytes.len() as u64;
+    // Grow first, so running out of disk space fails before any byte is replaced.
+    if len > file.metadata()?.len() {
+        file.set_len(len)?;
+    }
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.set_len(len)?;
+    file.sync_all()
 }
 
 fn truncate_at_char(s: &str, max: usize) -> String {
@@ -289,6 +429,7 @@ fn hex_dump(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     fn temp(name: &str, bytes: &[u8]) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("filecraft-preview-{}", std::process::id()));
@@ -335,12 +476,73 @@ mod tests {
         p.begin_edit().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&path, b"changed elsewhere\n").unwrap();
-        let f = fs::File::options().write(true).open(&path).unwrap();
-        f.set_modified(SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
         p.buffer = "mine\n".into();
         assert!(matches!(p.save(false), Err(SaveError::Conflict)));
         assert!(p.save(true).is_ok());
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine\n");
+    }
+
+    /// FC-04: a file deleted on disk is a conflict; only Overwrite recreates it.
+    #[test]
+    fn deleted_file_is_a_conflict() {
+        let path = temp("deleted.txt", b"original");
+        let mut p = Preview::load(&path, false);
+        p.begin_edit().unwrap();
+        p.buffer = "replacement".into();
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(p.save(false), Err(SaveError::Conflict)));
+        assert!(!path.exists());
+        assert!(p.save(true).is_ok());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+    }
+
+    /// FC-04: keeping the modification time does not hide a rewritten or replaced file.
+    #[test]
+    fn same_mtime_changes_are_conflicts() {
+        let path = temp("same-mtime.txt", b"original");
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut p = Preview::load(&path, false);
+        p.begin_edit().unwrap();
+        p.buffer = "mine".into();
+
+        fs::write(&path, b"ORIGINAL").unwrap();
+        fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+        assert!(matches!(p.save(false), Err(SaveError::Conflict)), "rewritten in place");
+
+        let other = temp("same-mtime-other.txt", b"original");
+        fs::File::options().write(true).open(&other).unwrap().set_modified(mtime).unwrap();
+        fs::rename(&other, &path).unwrap();
+        assert!(matches!(p.save(false), Err(SaveError::Conflict)), "replaced by another file");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+    }
+
+    /// FC-04: when a write fails and the original cannot be put back, a copy of it survives.
+    #[test]
+    fn failed_write_keeps_a_copy_of_the_original() {
+        let path = temp("failed-write.txt", b"original");
+        let dir = std::env::temp_dir().join(format!("filecraft-backup-failed-{}", std::process::id()));
+        // A read-only handle makes both the write and the restore fail.
+        let mut file = fs::File::open(&path).unwrap();
+        let err = write_in_place(&mut file, "failed-write.txt", b"original", b"new content", &dir).unwrap_err();
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        let backups: Vec<PathBuf> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(backups.len(), 1);
+        assert!(err.to_string().contains(&backups[0].display().to_string()), "{err}");
+        assert_eq!(fs::read(&backups[0]).unwrap(), b"original");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn successful_saves_leave_no_backup() {
+        let path = temp("no-backup.txt", b"before");
+        let dir = std::env::temp_dir().join(format!("filecraft-backup-ok-{}", std::process::id()));
+        let mut file = open_for_save(&path).unwrap();
+        write_in_place(&mut file, "no-backup.txt", b"before", b"after, and longer", &dir).unwrap();
+        drop(file);
+        assert_eq!(fs::read(&path).unwrap(), b"after, and longer");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

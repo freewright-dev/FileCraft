@@ -64,8 +64,13 @@ Select a file to preview it. Text files show their first 512 KB.
 
 - **✏ Edit** (or F4) turns the preview into an editor for files up to 8 MB that are UTF-8 text.
   **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept.
-- If the file changed on disk after you started editing, saving stops and offers
-  **Overwrite** or **Reload from disk**.
+- If the file was changed, replaced or deleted on disk after you started editing, saving stops
+  and offers **Overwrite** or **Reload from disk**. Overwrite recreates a deleted file.
+- Saving writes into the existing file, so its permissions, attributes and hard links are kept.
+  A copy of the original is kept in `%LOCALAPPDATA%\FileCraft\backup` until the write finishes;
+  if a save fails and the original cannot be restored, the error names that copy.
+- Saving fails with "being used by another process" while another program has the file open
+  for writing.
 - Switching to another result or closing the window with unsaved changes asks whether to save.
 - **External editor** (Ctrl+E) opens the file in the editor set in **Settings** (default: the
   `FILECRAFT_EDITOR`, `VISUAL` or `EDITOR` environment variable, else Notepad). For VS Code use `code`.
