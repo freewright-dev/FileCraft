@@ -1,9 +1,11 @@
 //! Preview pane content and in-place text editing.
 
+use std::collections::BinaryHeap;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
@@ -115,12 +117,16 @@ pub struct PreviewLoader {
     requests: Sender<Request>,
     results: Receiver<(u64, Preview)>,
     generation: u64,
+    /// The newest generation requested, so the worker can abandon a folder listing early.
+    latest: Arc<AtomicU64>,
 }
 
 impl PreviewLoader {
     pub fn new(on_result: impl Fn() + Send + 'static) -> Self {
         let (requests, rx) = unbounded::<Request>();
         let (tx, results) = unbounded();
+        let latest = Arc::new(AtomicU64::new(0));
+        let newest = Arc::clone(&latest);
         std::thread::Builder::new()
             .name("preview".into())
             .spawn(move || {
@@ -130,7 +136,9 @@ impl PreviewLoader {
                         request = newer;
                     }
                     let (generation, path, is_dir, edit) = request;
-                    let preview = if edit { Preview::load_for_edit(&path) } else { Preview::load(&path, is_dir) };
+                    let stale = || newest.load(Ordering::Relaxed) != generation;
+                    let preview =
+                        if edit { Preview::load_for_edit(&path) } else { Preview::load_cancellable(&path, is_dir, &stale) };
                     if tx.send((generation, preview)).is_err() {
                         break;
                     }
@@ -138,18 +146,22 @@ impl PreviewLoader {
                 }
             })
             .expect("spawn preview thread");
-        Self { requests, results, generation: 0 }
+        Self { requests, results, generation: 0, latest }
     }
 
     pub fn submit(&mut self, path: PathBuf, is_dir: bool) {
-        self.generation += 1;
-        let _ = self.requests.send((self.generation, path, is_dir, false));
+        self.send(path, is_dir, false);
     }
 
     /// Requests a file preview that is also ready for editing (see [`Preview::load_for_edit`]).
     pub fn submit_edit(&mut self, path: PathBuf) {
+        self.send(path, false, true);
+    }
+
+    fn send(&mut self, path: PathBuf, is_dir: bool, edit: bool) {
         self.generation += 1;
-        let _ = self.requests.send((self.generation, path, false, true));
+        self.latest.store(self.generation, Ordering::Relaxed);
+        let _ = self.requests.send((self.generation, path, is_dir, edit));
     }
 
     /// Only the most recently requested preview may replace the pane.
@@ -165,6 +177,11 @@ impl PreviewLoader {
 
 impl Preview {
     pub fn load(path: &Path, is_dir: bool) -> Preview {
+        Preview::load_cancellable(path, is_dir, &|| false)
+    }
+
+    /// Like [`Preview::load`]; a folder listing stops early once `stale` returns true.
+    pub fn load_cancellable(path: &Path, is_dir: bool, stale: &dyn Fn() -> bool) -> Preview {
         let mut p = Preview {
             path: path.to_path_buf(),
             content: Content::Message(String::new()),
@@ -196,7 +213,7 @@ impl Preview {
             );
             return p;
         }
-        p.content = if is_dir { load_dir(path) } else { p.load_file(&meta) };
+        p.content = if is_dir { load_dir(path, stale) } else { p.load_file(&meta) };
         p
     }
 
@@ -515,20 +532,34 @@ fn truncate_at_char(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-fn load_dir(path: &Path) -> Content {
-    match fs::read_dir(path) {
-        Ok(rd) => {
-            let mut entries: Vec<(bool, String)> = rd
-                .flatten()
-                .map(|e| (e.file_type().is_ok_and(|t| t.is_dir()), e.file_name().to_string_lossy().into_owned()))
-                .collect();
-            entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
-            let total = entries.len();
-            entries.truncate(DIR_LIMIT);
-            Content::Directory { entries, total }
+/// Lists a folder: folders first, then by case-insensitive name. Only the first [`DIR_LIMIT`]
+/// entries in that order are kept (a max-heap of that size), so a folder with millions of
+/// entries costs `DIR_LIMIT` entries of memory while the rest are only counted. The listing
+/// stops early once `stale` says a newer preview was requested.
+fn load_dir(path: &Path, stale: &dyn Fn() -> bool) -> Content {
+    let rd = match fs::read_dir(path) {
+        Ok(rd) => rd,
+        Err(e) => return Content::Message(format!("Cannot read folder: {e}")),
+    };
+    // (not a folder, lowercase name, name): ascending order is display order.
+    let mut top: BinaryHeap<(bool, String, String)> = BinaryHeap::with_capacity(DIR_LIMIT + 1);
+    let mut total = 0usize;
+    for entry in rd.flatten() {
+        if total.is_multiple_of(1024) && stale() {
+            return Content::Message("Preview cancelled".into());
         }
-        Err(e) => Content::Message(format!("Cannot read folder: {e}")),
+        total += 1;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let key = (!entry.file_type().is_ok_and(|t| t.is_dir()), name.to_lowercase(), name);
+        if top.len() < DIR_LIMIT {
+            top.push(key);
+        } else if top.peek().is_some_and(|last| key < *last) {
+            top.pop();
+            top.push(key);
+        }
     }
+    let entries = top.into_sorted_vec().into_iter().map(|(not_dir, _, name)| (!not_dir, name)).collect();
+    Content::Directory { entries, total }
 }
 
 fn hex_dump(bytes: &[u8]) -> String {
@@ -765,6 +796,30 @@ mod tests {
         assert!(matches!(Preview::load(&huge, false).content, Content::Message(m) if m.starts_with("Cannot show image")));
         fs::remove_file(broken).unwrap();
         fs::remove_file(huge).unwrap();
+    }
+
+    /// MIN-01: a big folder keeps only `DIR_LIMIT` entries (still in display order) and the
+    /// listing stops as soon as a newer preview is requested.
+    #[test]
+    fn folder_listing_is_bounded_and_cancellable() {
+        let dir = std::env::temp_dir().join(format!("filecraft-preview-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Zed folder")).unwrap();
+        for i in 0..DIR_LIMIT + 5 {
+            fs::write(dir.join(format!("file {i:04}.txt")), b"").unwrap();
+        }
+
+        let p = Preview::load(&dir, true);
+        let Content::Directory { entries, total } = p.content else { panic!("expected a folder listing") };
+        assert_eq!(total, DIR_LIMIT + 6);
+        assert_eq!(entries.len(), DIR_LIMIT);
+        assert_eq!(entries[0], (true, "Zed folder".to_string()), "folders first");
+        assert_eq!(entries[1].1, "file 0000.txt");
+        assert_eq!(entries[DIR_LIMIT - 1].1, format!("file {:04}.txt", DIR_LIMIT - 2));
+
+        let cancelled = Preview::load_cancellable(&dir, true, &|| true);
+        assert!(matches!(cancelled.content, Content::Message(m) if m.contains("cancelled")));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

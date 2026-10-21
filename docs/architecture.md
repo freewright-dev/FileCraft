@@ -45,7 +45,12 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
 - **Walk** (`walk.rs`) — worker threads pull directories from a shared queue. Every entry gets its
   final id from an atomic counter, so subdirectories are queued with their id and a single
   collector thread fills the table without any path lookups. Junctions and symlinks are listed but
-  not followed. On Windows the metadata comes from the directory listing itself.
+  not followed. On Windows the metadata comes from the directory listing itself. Entries reach
+  the collector in batches of at most 4,096 through a bounded channel. Only workers send and only
+  the collector receives, so a slow collector holds the workers back without any risk of
+  deadlock. When the shared queue holds 4,096 folders, a worker keeps the folders it finds on its
+  own stack and walks them depth-first. Cancellation is checked between entries, not only
+  between folders.
 - **Indexer** (`indexer.rs`) — one thread per drive: load the cache and publish it, then rebuild
   if the cache is missing or too old (MFT when elevated and NTFS, else walk, with walk as the
   fallback when the MFT read fails), save the cache and publish again. Each drive has its own
