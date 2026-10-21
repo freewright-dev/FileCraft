@@ -184,16 +184,14 @@ impl FileCraftApp {
             self.restore_selection();
         }
 
-        if let Some(mut preview) = self.preview_loader.poll()
+        if let Some(preview) = self.preview_loader.poll()
             && self.preview_request.as_ref() == Some(&preview.path)
         {
             self.preview_request = None;
-            if std::mem::take(&mut self.edit_when_ready)
-                && let Err(e) = preview.begin_edit()
-            {
-                self.set_status(e);
-            }
             self.preview = Some(preview);
+            if std::mem::take(&mut self.edit_when_ready) {
+                self.start_edit();
+            }
         }
 
         if self.needs_search {
@@ -278,6 +276,21 @@ impl FileCraftApp {
         self.preview_loader.submit(path, is_dir);
     }
 
+    /// Starts editing the loaded preview. A truncated text preview is first read in full on the
+    /// preview thread (the current preview stays visible); editing starts when that arrives.
+    fn start_edit(&mut self) {
+        let Some(p) = self.preview.as_mut() else { return };
+        if p.needs_full_read() {
+            let path = p.path.clone();
+            self.preview_request = Some(path.clone());
+            self.preview_loader.submit_edit(path);
+            self.edit_when_ready = true;
+            self.set_status("Reading the whole file for editing…");
+        } else if let Err(e) = p.begin_edit() {
+            self.set_status(e);
+        }
+    }
+
     fn run_action(&mut self, action: RowAction, ctx: &egui::Context) {
         let Some(hit) = self.selected else { return };
         let v = self.shown.volume(hit.vol);
@@ -306,10 +319,9 @@ impl FileCraftApp {
                 if self.preview_request.as_ref() == Some(&path) {
                     self.edit_when_ready = true;
                 }
-                if let Some(p) = self.preview.as_mut().filter(|p| p.path == path)
-                    && let Err(e) = p.begin_edit() {
-                        self.set_status(e);
-                    }
+                if self.preview.as_ref().is_some_and(|p| p.path == path) {
+                    self.start_edit();
+                }
                 Ok(())
             }
         };
@@ -839,10 +851,9 @@ impl FileCraftApp {
             ui.weak("Loading preview…");
         }
 
-        if begin_edit && let Some(p) = self.preview.as_mut()
-            && let Err(e) = p.begin_edit() {
-                self.set_status(e);
-            }
+        if begin_edit {
+            self.start_edit();
+        }
         if save {
             self.save_edit(false);
         }

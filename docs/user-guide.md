@@ -64,6 +64,8 @@ Select a file to preview it. Text files show their first 512 KB.
 
 - **✏ Edit** (or F4) turns the preview into an editor for files up to 8 MB that are UTF-8 text.
   **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept.
+  A file longer than the preview is first read in full in the background, and editing starts
+  when that is done. If it has grown past 8 MB by then, editing is refused.
 - If the file was changed, replaced or deleted on disk after you started editing, saving stops
   and offers **Overwrite** or **Reload from disk**. Overwrite recreates a deleted file.
 - Saving writes into the existing file, so its permissions, attributes and hard links are kept.

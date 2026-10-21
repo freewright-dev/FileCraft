@@ -42,6 +42,9 @@ All notable changes to this project are documented here. The format follows
   startup; it is ignored and rebuilt. Loading also rejects caches for another drive, files over
   4 GiB, invalid name ranges, parent loops, incomplete or duplicated sort orders and trailing
   data (FC-02).
+- Editing a file longer than its preview no longer reads it on the UI thread without a limit.
+  The whole file is read on the preview thread, never more than 8 MB, even if it grew after it
+  was previewed, and only if it is still a regular file available locally (FC-05).
 
 ### Security
 
