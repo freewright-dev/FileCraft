@@ -170,7 +170,7 @@ mod bench {
         let size = std::fs::metadata(&path).unwrap().len();
         eprintln!("cache save: {:.2?} ({} MB)", t.elapsed(), size / 1_000_000);
         let t = Instant::now();
-        let v = crate::index::VolumeIndex::load(&path).unwrap();
+        let v = crate::index::VolumeIndex::load(&path, letter).unwrap();
         eprintln!("cache load: {:.2?}", t.elapsed());
         let _ = std::fs::remove_file(&path);
 

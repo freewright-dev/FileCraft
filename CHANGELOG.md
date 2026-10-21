@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format follows
   file is checked and written through one handle, so the path cannot be swapped in between, and
   a copy of the original is kept until the write completes, so a failed save no longer leaves
   it truncated (FC-04).
+- A corrupt index cache with an out-of-range build timestamp no longer crashes FileCraft at
+  startup; it is ignored and rebuilt. Loading also rejects caches for another drive, files over
+  4 GiB, invalid name ranges, parent loops, incomplete or duplicated sort orders and trailing
+  data (FC-02).
 
 ### Security
 

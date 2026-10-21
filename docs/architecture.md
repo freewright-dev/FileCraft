@@ -49,8 +49,16 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
 
 `%LOCALAPPDATA%\FileCraft\index\<letter>.idx`, little-endian: magic and version, drive letter,
 source, build time, both name arenas, the entry table and the four sort orders. Files are written
-to a temporary name and renamed into place. Loading validates every offset, parent id and order
-id, and a cache that fails validation is ignored and rebuilt.
+to a temporary name and renamed into place. Loading reads at most 4 GiB and checks everything
+before the index is used:
+- the drive letter matches the drive being loaded;
+- the source byte and build timestamp are valid;
+- every name range lies inside its arena on character boundaries;
+- parent ids are in range, entry 0 is a root folder, and parent links contain no loops;
+- each sort order lists every entry with a parent exactly once;
+- no bytes are left over.
+
+A cache that fails any check is ignored and rebuilt; a malformed cache never causes a panic.
 
 ## Searching
 
