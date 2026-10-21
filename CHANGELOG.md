@@ -74,6 +74,10 @@ All notable changes to this project are documented here. The format follows
   listing stops as soon as another item is selected. The folder scan streams large folders in
   bounded batches, so a slow collector holds the workers back, and it can be cancelled part-way
   through a folder (MIN-01).
+- Concurrent cache saves for the same drive no longer collide on one `<letter>.tmp` file, which
+  made most of them fail under load. Saves use unique, exclusively created and synced staging
+  files. A cancelled indexing job no longer replaces the cache, and an older snapshot never
+  replaces a newer one from another instance. Leftover staging files are cleaned up (FC-07).
 
 ### Security
 

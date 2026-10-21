@@ -59,8 +59,16 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
 ## Cache format
 
 `%LOCALAPPDATA%\FileCraft\index\<letter>.idx`, little-endian: magic and version, drive letter,
-source, build time, both name arenas, the entry table and the four sort orders. Files are written
-to a temporary name and renamed into place. Loading reads at most 4 GiB and checks everything
+source, build time, both name arenas, the entry table and the four sort orders.
+
+Each save writes and syncs its own staging file, `<letter>.<pid>-<n>.tmp`, created exclusively so
+concurrent saves never share one, and renames it into place, so readers always see a whole
+snapshot. The rename is skipped in two cases: the indexing job was superseded (checked under a
+process-wide lock, together with the rename), or the cache already holds a snapshot built later,
+for example by another FileCraft instance. The newest snapshot wins. Staging files more than an
+hour old are leftovers from a crash and are deleted.
+
+Loading reads at most 4 GiB and checks everything
 before the index is used:
 - the drive letter matches the drive being loaded;
 - the source byte and build timestamp are valid;

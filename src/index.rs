@@ -501,19 +501,53 @@ pub fn cache_path(letter: char) -> PathBuf {
     data_dir().join("index").join(format!("{letter}.idx"))
 }
 
+/// Serializes the check-then-rename step of saves in this process.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Staging files older than this are left over from a crash and are deleted.
+const STALE_STAGING: Duration = Duration::from_secs(3600);
+
 impl VolumeIndex {
+    /// [`VolumeIndex::save_unless`] that is never superseded (tests and the benchmark).
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+        self.save_unless(path, &|| false).map(|_| ())
+    }
+
+    /// Writes the cache to `path` and returns whether it replaced it. The data goes to a staging
+    /// file of its own (created exclusively, so concurrent saves never share or follow one) and
+    /// is synced before it is renamed over `path`, so readers always see one whole snapshot.
+    /// Nothing is replaced when `superseded` says a newer job owns this drive, or when `path`
+    /// already holds a snapshot built later (by another instance): the newest snapshot wins.
+    pub fn save_unless(&self, path: &Path, superseded: &dyn Fn() -> bool) -> io::Result<bool> {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        fs::create_dir_all(dir)?;
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        remove_stale_staging(dir, &stem);
+        let (tmp, file) = create_staging(dir, &stem)?;
+        let result = self.write_to(file).and_then(|()| {
+            let _one_at_a_time = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if superseded() || cached_build_secs(path).is_some_and(|secs| secs > self.built_secs()) {
+                return Ok(false);
+            }
+            fs::rename(&tmp, path).map(|()| true)
+        });
+        if !matches!(result, Ok(true)) {
+            let _ = fs::remove_file(&tmp);
         }
-        let tmp = path.with_extension("tmp");
+        result
+    }
+
+    fn built_secs(&self) -> u64 {
+        self.built_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    }
+
+    fn write_to(&self, file: fs::File) -> io::Result<()> {
         {
-            let mut w = BufWriter::with_capacity(1 << 20, fs::File::create(&tmp)?);
+            let mut w = BufWriter::with_capacity(1 << 20, file);
             w.write_all(CACHE_MAGIC)?;
             w.write_all(&(self.letter as u32).to_le_bytes())?;
             w.write_all(&[matches!(self.source, Source::Mft) as u8])?;
-            let built = self.built_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-            w.write_all(&built.to_le_bytes())?;
+            w.write_all(&self.built_secs().to_le_bytes())?;
             w.write_all(&(self.build_time.as_millis() as u64).to_le_bytes())?;
             for arena in [&self.names, &self.lower] {
                 w.write_all(&(arena.len() as u64).to_le_bytes())?;
@@ -536,9 +570,8 @@ impl VolumeIndex {
                     w.write_all(&id.to_le_bytes())?;
                 }
             }
-            w.flush()?;
+            w.into_inner().map_err(|e| e.into_error())?.sync_all()
         }
-        fs::rename(&tmp, path)
     }
 
     /// Reads the cache of drive `letter`. Anything malformed is an `InvalidData` error rather
@@ -638,6 +671,44 @@ impl VolumeIndex {
 
 fn invalid(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
+}
+
+/// Creates `<stem>.<pid>-<n>.tmp` in `dir`, failing rather than reusing (or following) a name
+/// that already exists.
+fn create_staging(dir: &Path, stem: &str) -> io::Result<(PathBuf, fs::File)> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!("{stem}.{}-{n}.tmp", std::process::id()));
+        match fs::File::options().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Deletes staging files of `stem` that a crashed save left behind (including the old fixed
+/// `<stem>.tmp` name). Recent ones may belong to a save in progress and are kept.
+fn remove_stale_staging(dir: &Path, stem: &str) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > STALE_STAGING));
+        if name.starts_with(&format!("{stem}.")) && name.ends_with(".tmp") && stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Build time (seconds since 1970) recorded in the cache at `path`, if it is a FileCraft cache.
+fn cached_build_secs(path: &Path) -> Option<u64> {
+    let mut header = [0u8; 21];
+    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    (&header[..8] == CACHE_MAGIC).then(|| u64::from_le_bytes(header[13..21].try_into().unwrap()))
 }
 
 /// Reads a whole file, refusing one larger than `budget` bytes.
@@ -873,5 +944,69 @@ pub mod tests {
         b.set(3, "orphan.txt", 2, 0, 1, 0);
         let v = b.finish(Source::Walk, Duration::ZERO);
         load_error("detached", &cache_bytes(&v), 'C');
+    }
+
+    fn cache_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("filecraft-test-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn staging_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// FC-07: concurrent saves of one drive used to share `C.tmp` and fail or interleave.
+    #[test]
+    fn concurrent_saves_do_not_collide() {
+        let dir = cache_dir("concurrent-save");
+        let path = dir.join("C.idx");
+        let v = sample();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8).map(|_| s.spawn(|| v.save(&path))).collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(VolumeIndex::load(&path, 'C').unwrap().len(), v.len());
+        assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// FC-07: a superseded job, or an older snapshot, never replaces the cache.
+    #[test]
+    fn superseded_or_older_snapshots_are_not_published() {
+        let dir = cache_dir("superseded-save");
+        let path = dir.join("C.idx");
+        let newer = sample();
+        assert!(!newer.save_unless(&path, &|| true).unwrap());
+        assert!(!path.exists());
+
+        assert!(newer.save_unless(&path, &|| false).unwrap());
+        let mut older = sample();
+        older.built_at = newer.built_at - Duration::from_secs(60);
+        assert!(!older.save_unless(&path, &|| false).unwrap());
+        assert_eq!(VolumeIndex::load(&path, 'C').unwrap().built_secs(), newer.built_secs());
+        assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn stale_staging_files_are_removed() {
+        let dir = cache_dir("stale-staging");
+        let old = dir.join("C.tmp");
+        fs::write(&old, b"left over").unwrap();
+        fs::File::options().write(true).open(&old).unwrap().set_modified(SystemTime::now() - 2 * STALE_STAGING).unwrap();
+        let recent = dir.join("C.999-0.tmp");
+        fs::write(&recent, b"in progress").unwrap();
+        sample().save(&dir.join("C.idx")).unwrap();
+        assert_eq!(staging_files(&dir), ["C.999-0.tmp"]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

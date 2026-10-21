@@ -229,7 +229,9 @@ impl Job {
 
         match result {
             Ok(v) => {
-                let cache_error = v.save(&cache_path(letter)).err().map(|e| e.to_string());
+                // A cancelled (superseded) job must not replace the newer job's cache.
+                let superseded = || self.cancel.load(Ordering::Relaxed);
+                let cache_error = v.save_unless(&cache_path(letter), &superseded).err().map(|e| e.to_string());
                 self.publish(v);
                 self.update(|s| {
                     s.refreshing = false;
