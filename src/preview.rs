@@ -100,7 +100,10 @@ pub struct Preview {
     loaded: Option<FileVersion>,
     /// The whole text of a truncated preview, read on the preview thread for editing.
     edit_text: Option<String>,
+    /// Saves end every line with CRLF (else LF).
     crlf: bool,
+    /// The file used both CRLF and LF; saving converts every line to one style.
+    mixed_newlines: bool,
     bom: bool,
 }
 
@@ -173,6 +176,7 @@ impl Preview {
             loaded: None,
             edit_text: None,
             crlf: false,
+            mixed_newlines: false,
             bom: false,
         };
         let meta = match fs::metadata(path) {
@@ -295,12 +299,21 @@ impl Preview {
             Err(e) if truncated && e.error_len().is_none() => (String::from_utf8_lossy(&body[..e.valid_up_to()]).into_owned(), true),
             Err(_) => (String::from_utf8_lossy(body).into_owned(), false),
         };
-        self.crlf = text.contains("\r\n");
-        (if self.crlf { text.replace("\r\n", "\n") } else { text }, valid)
+        // Mixed files are saved with their more common ending; the editor says so up front.
+        let crlf = text.matches("\r\n").count();
+        let lf = text.matches('\n').count() - crlf;
+        self.crlf = crlf > 0 && crlf >= lf;
+        self.mixed_newlines = crlf > 0 && lf > 0;
+        (if crlf > 0 { text.replace("\r\n", "\n") } else { text }, valid)
     }
 
     pub fn can_edit(&self) -> bool {
         matches!(self.content, Content::Text { .. }) && self.not_editable.is_none()
+    }
+
+    /// For a file that mixes CRLF and LF, the one line ending every line gets when it is saved.
+    pub fn mixed_newlines_saved_as(&self) -> Option<&'static str> {
+        self.mixed_newlines.then_some(if self.crlf { "CRLF" } else { "LF" })
     }
 
     pub fn begin_edit(&mut self) -> Result<(), String> {
@@ -544,6 +557,28 @@ mod tests {
         let p = dir.join(name);
         fs::write(&p, bytes).unwrap();
         p
+    }
+
+    /// MIN-02: mixed line endings are reported before saving and saved in the more common style.
+    #[test]
+    fn mixed_line_endings_are_announced() {
+        let path = temp("mixed.txt", b"a\r\nb\nc\r\n");
+        let mut p = Preview::load(&path, false);
+        assert_eq!(p.mixed_newlines_saved_as(), Some("CRLF"));
+        p.begin_edit().unwrap();
+        assert_eq!(p.buffer, "a\nb\nc\n");
+        assert!(p.save(false).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"a\r\nb\r\nc\r\n");
+
+        // Mostly LF: saved as LF, not converted to CRLF because of a single CRLF.
+        let path = temp("mostly-lf.txt", b"a\nb\nc\r\n");
+        let mut p = Preview::load(&path, false);
+        assert_eq!(p.mixed_newlines_saved_as(), Some("LF"));
+        p.begin_edit().unwrap();
+        assert!(p.save(false).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"a\nb\nc\n");
+
+        assert_eq!(Preview::load(&temp("only-crlf.txt", b"a\r\nb\r\n"), false).mixed_newlines_saved_as(), None);
     }
 
     #[test]
