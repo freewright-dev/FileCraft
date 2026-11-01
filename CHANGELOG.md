@@ -97,6 +97,9 @@ All notable changes to this project are documented here. The format follows
   now orders folders by their names from the root, compared name by name. This is the same as
   sorting the full path text except where one sibling's name is a prefix of another's (`a` and
   `a b`), where folders sort by their own chain (FC-12).
+- Path queries (`\`, `/`, `path:`, *Match path*) no longer rebuild every result's full path from
+  the drive root. On a 20,000-level folder chain each keystroke took about 2 s; it now takes
+  milliseconds, whatever the sort column (FC-12).
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

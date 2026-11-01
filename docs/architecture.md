@@ -97,7 +97,10 @@ A cache that fails any check is ignored and rebuilt; a malformed cache never cau
 `Query::parse` turns the text into clauses (AND), each with alternatives (OR, from `a|b`) and an
 optional negation. A clause is a substring test (`memchr::memmem` on the lowercased name arena),
 a wildcard (`globset`), a regex, an extension, type, size or date test. Full paths are only built
-for path terms, once per entry, in a per-thread scratch buffer.
+for path terms, once per entry, in a per-thread scratch buffer. The buffer keeps the folder chain
+of the last path and only adds or drops the names that differ, so a query with path terms is
+filtered in path order (where consecutive paths share most of their folders) and its hits are
+then taken in the requested order. That keeps path queries linear however deep the folders.
 
 Each drive is filtered on its own thread, and drives with more than 50,000 entries are split
 across worker threads by chunks of the sort order. Per-drive results are then merged pairwise in

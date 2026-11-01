@@ -22,6 +22,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use memchr::memmem;
 use regex::{Regex, RegexBuilder};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
@@ -163,6 +164,13 @@ impl Query {
 
     pub fn is_empty(&self) -> bool {
         self.clauses.is_empty()
+    }
+
+    /// Whether some test looks at full paths rather than names.
+    fn uses_path(&self) -> bool {
+        self.clauses.iter().flat_map(|c| &c.alts).any(|t| {
+            matches!(t, Test::Text { path: true, .. } | Test::Wildcard { path: true, .. } | Test::Regex { path: true, .. })
+        })
     }
 }
 
@@ -365,14 +373,73 @@ fn day_start(s: &str) -> Result<i64, String> {
 struct Scratch {
     path: String,
     path_for: Option<(u32, bool)>,
+    /// The folder chain of the last path built, as typed and lowercased.
+    chains: [DirChain; 2],
 }
 
 impl Scratch {
     fn path<'a>(&'a mut self, v: &VolumeIndex, idx: u32, lowercase: bool) -> &'a str {
         if self.path_for != Some((idx, lowercase)) {
-            self.path.clear();
-            v.write_path(idx, &mut self.path, lowercase);
-            self.path_for = Some((idx, lowercase));
+            let Scratch { path, path_for, chains } = self;
+            path.clear();
+            if idx == 0 {
+                v.write_path(0, path, lowercase);
+            } else {
+                path.push_str(chains[lowercase as usize].folder_path(v, v.entry(idx).parent, lowercase));
+                path.push('\\');
+                path.push_str(if lowercase { v.lower_name(idx) } else { v.name(idx) });
+            }
+            *path_for = Some((idx, lowercase));
+        }
+        &self.path
+    }
+}
+
+/// The path of the folder whose path was built last, with the chain of folders it is made of.
+/// The next folder's path reuses the part of the chain the two share, so walking the entries in
+/// path order costs time linear in their number, not in their depth (FC-12). Other orders cost
+/// at most what rebuilding each path from the root did.
+#[derive(Default)]
+struct DirChain {
+    /// Folder ids from the top down, the length of `path` after each, and each id's position.
+    ids: Vec<u32>,
+    ends: Vec<usize>,
+    position: HashMap<u32, usize>,
+    /// `x:` followed by `\name` for each folder in `ids`.
+    path: String,
+    walked: Vec<u32>,
+}
+
+impl DirChain {
+    fn folder_path<'a>(&'a mut self, v: &VolumeIndex, dir: u32, lowercase: bool) -> &'a str {
+        if self.path.is_empty() {
+            self.path.push(if lowercase { v.letter.to_ascii_lowercase() } else { v.letter });
+            self.path.push(':');
+        }
+        // Climb from `dir` to the nearest folder already on the chain, or to the root.
+        self.walked.clear();
+        let mut cur = dir;
+        let keep = loop {
+            if cur == 0 || cur == crate::index::NONE || self.walked.len() > v.len() {
+                break 0;
+            }
+            if let Some(&pos) = self.position.get(&cur) {
+                break pos + 1;
+            }
+            self.walked.push(cur);
+            cur = v.entry(cur).parent;
+        };
+        for id in self.ids.drain(keep..) {
+            self.position.remove(&id);
+        }
+        self.ends.truncate(keep);
+        self.path.truncate(self.ends.last().copied().unwrap_or(2));
+        for &id in self.walked.iter().rev() {
+            self.path.push('\\');
+            self.path.push_str(if lowercase { v.lower_name(id) } else { v.name(id) });
+            self.position.insert(id, self.ids.len());
+            self.ids.push(id);
+            self.ends.push(self.path.len());
         }
         &self.path
     }
@@ -438,6 +505,17 @@ const CANCEL_CHECK: usize = 1 << 15;
 fn filter_volume(v: &VolumeIndex, order: &[u32], q: &Query, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
     if q.is_empty() {
         return Some(order.to_vec());
+    }
+    // Paths are cheap to build in path order, where each one extends or shortens the last
+    // (see `DirChain`). So a path query is filtered in path order, and its hits are then taken
+    // in the requested order: linear whatever the sort, however deep the folders (FC-12).
+    if q.uses_path() && !std::ptr::eq(order, v.by_path.as_slice()) {
+        let hits = filter_volume(v, &v.by_path, q, cancelled)?;
+        let mut keep = vec![false; v.slots()];
+        for &idx in &hits {
+            keep[idx as usize] = true;
+        }
+        return Some(order.iter().copied().filter(|&idx| keep[idx as usize]).collect());
     }
     let threads = thread_count();
     if order.len() < 50_000 || threads == 1 {
@@ -697,6 +775,48 @@ impl Searcher {
 mod tests {
     use super::*;
     use crate::index::tests::sample;
+    use crate::index::{ATTR_DIRECTORY, Source, VolumeBuilder};
+
+    /// A chain of `depth` folders with one file in each, names varying so name order is mixed.
+    fn chain(depth: u32) -> VolumeIndex {
+        let mut b = VolumeBuilder::new('C');
+        let mut parent = 0;
+        for i in 0..depth {
+            let dir = b.push(&format!("d{}", (i * 7919) % depth), parent, ATTR_DIRECTORY, 0, 0);
+            b.push(&format!("f{i}"), dir, 0, 1, 0);
+            parent = dir;
+        }
+        b.finish(Source::Walk, Duration::ZERO)
+    }
+
+    /// FC-12: incrementally built paths equal `full_path` in every order, both cases.
+    #[test]
+    fn scratch_paths_match_full_paths() {
+        for v in [chain(60), sample()] {
+            for key in [SortKey::Name, SortKey::Path, SortKey::Size, SortKey::Modified] {
+                let mut scratch = Scratch::default();
+                for &idx in v.order(key).iter().chain(&[0]) {
+                    assert_eq!(scratch.path(&v, idx, false), v.full_path(idx));
+                    assert_eq!(scratch.path(&v, idx, true), v.full_path(idx).to_lowercase());
+                }
+            }
+        }
+    }
+
+    /// FC-12: a path query over a 20,000-level chain rebuilt every entry's path from the root,
+    /// O(depth²) per keystroke whatever the sort. It is now linear.
+    #[test]
+    fn path_queries_on_deep_chains_are_linear() {
+        let index = Index::default().with_volume(Arc::new(chain(20_000)));
+        for (text, key) in [("path:zzz", SortKey::Name), ("path:zzz", SortKey::Path), ("\\d1\\ f1*", SortKey::Size)] {
+            let q = Query::parse(text, SearchOptions::default()).unwrap();
+            let start = Instant::now();
+            search(&index, &q, Sort { key, descending: false }, &|| false).unwrap();
+            let took = start.elapsed();
+            // About 2 s each before (optimised test profile); a few milliseconds now.
+            assert!(took < Duration::from_millis(500), "`{text}` by {key:?} took {took:?}");
+        }
+    }
 
     /// MIN-04: the cache keeps its snapshot alive (so its address cannot be reused by a newer
     /// one) and drops the cached lists when a different snapshot arrives.

@@ -87,6 +87,11 @@ impl VolumeIndex {
         self.by_name.len()
     }
 
+    /// Number of entry slots (ids run from 0 to this, exclusive), the root included.
+    pub fn slots(&self) -> usize {
+        self.entries.len()
+    }
+
     #[inline]
     pub fn entry(&self, idx: u32) -> &Entry {
         &self.entries[idx as usize]
