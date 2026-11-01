@@ -779,6 +779,7 @@ impl VolumeIndex {
         let by_size = orders.pop().unwrap();
         let by_path = orders.pop().unwrap();
         let by_name = orders.pop().unwrap();
+        check_orders(&entries, &lower, &by_name, &by_path, &by_size, &by_date)?;
 
         Ok(VolumeIndex {
             letter,
@@ -794,6 +795,41 @@ impl VolumeIndex {
             by_date,
         })
     }
+}
+
+/// Checks that a loaded cache's orders are sorted the way [`VolumeBuilder::finish`] sorts them
+/// (MIN-04). Name, size and date are checked exactly. For the path order, each folder's entries
+/// must be contiguous and sorted by name; checking the order of the folders themselves would
+/// mean recomputing their ranks on every start. Linear time.
+fn check_orders(entries: &[Entry], lower: &str, by_name: &[u32], by_path: &[u32], by_size: &[u32], by_date: &[u32]) -> io::Result<()> {
+    let lower_of = |i: u32| {
+        let e = &entries[i as usize];
+        arena_str(lower, e.lower_off, e.lower_len).unwrap_or("")
+    };
+    let by_lower = |a: u32, b: u32| lower_of(a).cmp(lower_of(b)).then(a.cmp(&b));
+    let increasing = |order: &[u32], cmp: &dyn Fn(u32, u32) -> Ordering| order.windows(2).all(|w| cmp(w[0], w[1]) == Ordering::Less);
+
+    let sorted = increasing(by_name, &by_lower)
+        && increasing(by_size, &|a, b| entries[a as usize].size.cmp(&entries[b as usize].size).then(a.cmp(&b)))
+        && increasing(by_date, &|a, b| entries[a as usize].mtime.cmp(&entries[b as usize].mtime).then(a.cmp(&b)));
+    if !sorted {
+        return Err(invalid("sort order not sorted"));
+    }
+
+    let mut finished = vec![false; entries.len()];
+    for w in by_path.windows(2) {
+        let (pa, pb) = (entries[w[0] as usize].parent, entries[w[1] as usize].parent);
+        let ok = if pa == pb {
+            by_lower(w[0], w[1]) == Ordering::Less
+        } else {
+            finished[pa as usize] = true;
+            !finished[pb as usize]
+        };
+        if !ok {
+            return Err(invalid("path order not sorted"));
+        }
+    }
+    Ok(())
 }
 
 fn invalid(msg: &str) -> io::Error {
@@ -1138,6 +1174,24 @@ pub mod tests {
         v.save(&path).unwrap();
         assert_eq!(VolumeIndex::load(&path, 'C').unwrap().len(), 2);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// MIN-04: the sort orders were only checked to list every entry once, not to be sorted, so
+    /// a tampered cache showed results out of order. Swapping two ids in any order is rejected.
+    #[test]
+    fn unsorted_cache_orders_are_rejected() {
+        let v = sample();
+        let good = cache_bytes(&v);
+        let entries_at = 8 + 4 + 1 + 8 + 8 + (8 + v.names.len()) + (8 + v.lower.len()) + 8;
+        let orders_at = entries_at + v.entries.len() * ENTRY_BYTES;
+        let listed = v.len();
+        for (k, label) in ["name", "path", "size", "date"].iter().enumerate() {
+            let first = orders_at + k * (8 + listed * 4) + 8;
+            let mut bytes = good.clone();
+            let (a, b) = bytes[first..first + 8].split_at_mut(4);
+            a.swap_with_slice(b);
+            load_error(&format!("unsorted-{label}"), &bytes, 'C');
+        }
     }
 
     /// FC-02: the audit's 21-byte cache with an overflowing timestamp used to panic (and abort).

@@ -102,6 +102,9 @@ All notable changes to this project are documented here. The format follows
   the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
   scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
   only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
+- Loading a cache checks that its sort orders are sorted, so a tampered cache can no longer show
+  results out of order. Name, size and date are checked exactly. For path, each folder's entries
+  must be contiguous and sorted by name (MIN-04).
 - Indexing fails with a clear error instead of corrupting the index when a drive exceeds the
   index format's limits: about 4 billion entries (the folder scan's id counter used to wrap to the
   root's id) or 4 GiB of file names (offsets used to wrap onto other names) (MIN-04).
