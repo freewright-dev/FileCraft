@@ -478,7 +478,9 @@ fn open_for_save(path: &Path) -> io::Result<fs::File> {
 /// Where a save keeps a copy of the original until the new content is completely written.
 fn backup_dir() -> PathBuf {
     if cfg!(test) {
-        std::env::temp_dir().join(format!("filecraft-backup-{}", std::process::id()))
+        // One folder for every test run: backup names already carry the process id, and each
+        // backup is deleted when its save completes, so nothing builds up between runs (MIN-04).
+        std::env::temp_dir().join("filecraft-test-backup")
     } else {
         crate::index::data_dir().join("backup")
     }
@@ -590,8 +592,10 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
+    /// Writes a fixture. The folder is shared by every run and each name belongs to one test, so
+    /// a run overwrites the files of the last one instead of leaving a new folder behind.
     fn temp(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("filecraft-preview-{}", std::process::id()));
+        let dir = std::env::temp_dir().join("filecraft-test-preview");
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
         fs::write(&p, bytes).unwrap();
