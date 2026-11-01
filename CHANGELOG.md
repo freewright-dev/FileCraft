@@ -102,6 +102,8 @@ All notable changes to this project are documented here. The format follows
   the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
   scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
   only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
+- Failures of Open and Run as admin report what ShellExecute returned (for example "no application
+  is associated with this kind of file") instead of an unrelated last OS error (MIN-04).
 - On a volume whose `$MFT` is fragmented enough that its run list continues in an
   `$ATTRIBUTE_LIST`, the NTFS reader no longer indexes only the records the first runs cover
   while reporting the drive as ready. It checks that the runs cover the whole table and start at

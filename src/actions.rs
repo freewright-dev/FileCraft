@@ -27,8 +27,36 @@ fn shell_execute(verb: &str, file: &str, params: Option<&str>) -> io::Result<()>
             SW_SHOWNORMAL,
         )
     };
-    // Values above 32 mean success.
-    if result as isize > 32 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    // Values above 32 mean success; the others are error codes, and the thread's last error is
+    // not reliably set, so it is not used (MIN-04).
+    let code = result as isize;
+    if code > 32 { Ok(()) } else { Err(shell_error(code)) }
+}
+
+/// Describes a `ShellExecuteW` failure code (0 or an `ERROR_*` / `SE_ERR_*` value up to 32).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shell_error(code: isize) -> io::Error {
+    let message = match code {
+        0 => "out of memory or resources",
+        2 => "file not found",
+        3 => "path not found",
+        5 => "access denied, or the administrator prompt was cancelled",
+        8 => "not enough memory",
+        11 => "the program is not a valid Windows application",
+        26 => "a sharing violation occurred",
+        27 => "the file association is incomplete or invalid",
+        28..=30 =>"the program did not respond to the request (DDE)",
+        31 => "no application is associated with this kind of file",
+        32 => "a required DLL was not found",
+        _ => return io::Error::other(format!("ShellExecute failed with code {code}")),
+    };
+    let kind = match code {
+        2 | 3 => io::ErrorKind::NotFound,
+        5 => io::ErrorKind::PermissionDenied,
+        0 | 8 => io::ErrorKind::OutOfMemory,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, message)
 }
 
 /// Opens a file or folder with its default application.
@@ -251,6 +279,15 @@ mod tests {
         );
         assert_eq!(split_command_line(r#"ed "" x"#), ["ed", "", "x"]);
         assert!(split_command_line("   ").is_empty());
+    }
+
+    /// MIN-04: ShellExecute's own codes are reported, not an unrelated "last error".
+    #[test]
+    fn shell_execute_codes_are_described() {
+        assert_eq!(shell_error(31).to_string(), "no application is associated with this kind of file");
+        assert_eq!(shell_error(2).kind(), io::ErrorKind::NotFound);
+        assert_eq!(shell_error(5).kind(), io::ErrorKind::PermissionDenied);
+        assert!(shell_error(17).to_string().contains("17"));
     }
 
     /// FC-17: a quote in the path used to end Explorer's argument and add switches of its own.
