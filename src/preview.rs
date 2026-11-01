@@ -54,8 +54,11 @@ pub enum SaveError {
 /// Modification times are not enough: they can be preserved or reset by other programs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct FileVersion {
-    /// Volume and file index (device and inode elsewhere): a replaced file gets a new one.
-    id: (u64, u64),
+    /// Volume and file id (device and inode elsewhere): a replaced file gets a new one.
+    id: (u64, u128),
+    /// Content length and hash. The hash (SipHash with fixed keys) is meant to catch accidental
+    /// changes, not a deliberately crafted collision; the length must match as well.
+    len: u64,
     hash: u64,
 }
 
@@ -63,28 +66,48 @@ impl FileVersion {
     fn of(file: &fs::File, bytes: &[u8]) -> io::Result<FileVersion> {
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
-        Ok(FileVersion { id: file_id(file)?, hash: hasher.finish() })
+        Ok(FileVersion { id: file_id(file)?, len: bytes.len() as u64, hash: hasher.finish() })
     }
 }
 
-fn file_id(file: &fs::File) -> io::Result<(u64, u64)> {
+/// The file's volume serial number and file id. Uses the full 64-bit serial and 128-bit id
+/// (`FileIdInfo`): ReFS ids do not fit the 64-bit index of `GetFileInformationByHandle`, which
+/// is only the fallback for file systems without `FileIdInfo` (MIN-04).
+fn file_id(file: &fs::File) -> io::Result<(u64, u128)> {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        };
+        // SAFETY: zero is a valid initial state for this plain struct.
+        let mut ex: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the handle stays open for the call; `ex` is writable and its exact size is passed.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&raw mut ex).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if ok != 0 {
+            return Ok((ex.VolumeSerialNumber, u128::from_le_bytes(ex.FileId.Identifier)));
+        }
         // SAFETY: zero is a valid initial state for this plain struct.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: the handle stays open for the call and `info` is writable.
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok((u64::from(info.dwVolumeSerialNumber), u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow)))
+        let index = u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow);
+        Ok((u64::from(info.dwVolumeSerialNumber), u128::from(index)))
     }
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::MetadataExt;
         let meta = file.metadata()?;
-        Ok((meta.dev(), meta.ino()))
+        Ok((meta.dev(), u128::from(meta.ino())))
     }
 }
 
@@ -654,6 +677,18 @@ mod tests {
         let p = Preview::load_for_edit(&path);
         assert!(!p.can_edit() && !p.needs_full_read());
         fs::remove_file(path).unwrap();
+    }
+
+    /// MIN-04: file identity comes from the full `FileIdInfo` id: two handles to one file agree,
+    /// and a different file, even with the same content, does not.
+    #[test]
+    fn file_ids_identify_files() {
+        let a = temp("id-a.txt", b"same");
+        let b = temp("id-b.txt", b"same");
+        let id = |p: &Path| file_id(&fs::File::open(p).unwrap()).unwrap();
+        assert_eq!(id(&a), id(&a));
+        assert_ne!(id(&a), id(&b));
+        assert_ne!(id(&a).1, 0);
     }
 
     /// FC-18: backups are never written through a junction planted on the backup folder.

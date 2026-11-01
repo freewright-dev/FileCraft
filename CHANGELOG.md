@@ -102,6 +102,9 @@ All notable changes to this project are documented here. The format follows
   the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
   scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
   only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
+- The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
+  (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
+  before cannot hold ReFS ids (MIN-04).
 - `!` and the `file:`, `folder:`, `ext:`, `size:`, `dm:`, `regex:` and `path:` prefixes apply to a
   quoted phrase written after them: `!"old copy"` and `folder:"my docs"` work. They were searched
   for as text before (`!old copy`, `folder:my docs`). Inside quotes everything stays literal (MIN-04).
