@@ -48,15 +48,24 @@ pub fn reveal(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        Command::new("explorer")
-            .raw_arg(format!("/select,\"{}\"", path.display()))
-            .spawn()
-            .map(|_| ())
+        Command::new("explorer").raw_arg(select_arg(path)?).spawn().map(|_| ())
     }
     #[cfg(not(windows))]
     {
         Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn().map(|_| ())
     }
+}
+
+/// Explorer's `/select,"…"` argument. Explorer parses its own command line and has no escape for
+/// `"`, so a quote in the path would end the argument and let in other switches (FC-17). Win32
+/// names cannot contain one, so such paths are refused.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_arg(path: &Path) -> io::Result<String> {
+    let path = path.display().to_string();
+    if path.contains('"') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the path contains a quote"));
+    }
+    Ok(format!("/select,\"{path}\""))
 }
 
 /// Shows the Windows file properties dialog.
@@ -229,6 +238,13 @@ mod tests {
         );
         assert_eq!(split_command_line(r#"ed "" x"#), ["ed", "", "x"]);
         assert!(split_command_line("   ").is_empty());
+    }
+
+    /// FC-17: a quote in the path used to end Explorer's argument and add switches of its own.
+    #[test]
+    fn reveal_refuses_quotes_in_paths() {
+        assert_eq!(select_arg(Path::new(r"C:\dir\a b.txt")).unwrap(), r#"/select,"C:\dir\a b.txt""#);
+        assert!(select_arg(Path::new(r#"C:\dir\a" /root,"C:\Windows"#)).is_err());
     }
 
     #[cfg(windows)]

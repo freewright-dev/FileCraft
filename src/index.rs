@@ -349,6 +349,13 @@ impl VolumeBuilder {
     }
 }
 
+/// Whether `name` can be one component of a path: not empty, `.` or `..`, and without a separator
+/// or NUL. The folder scan never lists anything else, and the NTFS reader substitutes such names.
+/// A cache holding one would make a displayed name stand for a different path (FC-17).
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['\\', '/', '\0'])
+}
+
 /// The `len` bytes at `off` in a name arena, if they lie inside it on character boundaries.
 #[inline]
 fn arena_str(arena: &str, off: u32, len: u16) -> Option<&str> {
@@ -657,7 +664,7 @@ impl VolumeIndex {
             return Err(invalid("bad entry count"));
         }
         let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
+        for i in 0..count {
             let e = Entry {
                 name_off: r.u32()?,
                 lower_off: r.u32()?,
@@ -673,6 +680,10 @@ impl VolumeIndex {
             }
             if arena_str(&names, e.name_off, e.name_len).is_none() || arena_str(&lower, e.lower_off, e.lower_len).is_none() {
                 return Err(invalid("bad name range"));
+            }
+            // Every linked entry (all but the root and unfilled slots) is one path component.
+            if i != 0 && e.parent != NONE && !arena_str(&names, e.name_off, e.name_len).is_some_and(valid_name) {
+                return Err(invalid("bad name"));
             }
             entries.push(e);
         }
@@ -1000,6 +1011,34 @@ pub mod tests {
         let err = result.err().unwrap_or_else(|| panic!("{label}: malformed cache was accepted"));
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{label}: {err}");
         err
+    }
+
+    /// FC-17: a cache entry whose name is a path (`..\..\Windows\win.ini`) or not a usable path
+    /// component made a displayed name stand for a different file. Such caches are rejected.
+    #[test]
+    fn caches_with_path_like_names_are_rejected() {
+        for (label, bad) in [
+            ("traversal", r"..\..\Windows\win.ini"),
+            ("dotdot", ".."),
+            ("dot", "."),
+            ("empty", ""),
+            ("slash", "a/b"),
+            ("nul", "a\0b"),
+        ] {
+            let mut b = VolumeBuilder::new('C');
+            let dir = b.push("Public", 0, ATTR_DIRECTORY, 0, 0);
+            b.push(bad, dir, 0, 1, 0);
+            load_error(&format!("name-{label}"), &cache_bytes(&b.finish(Source::Walk, Duration::ZERO)), 'C');
+        }
+        // Names that are odd but valid on NTFS still load.
+        let mut b = VolumeBuilder::new('C');
+        b.push("...x", 0, 0, 1, 0);
+        b.push("a\"b?", 0, 0, 1, 0);
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        let path = cache_dir("odd-names").join("C.idx");
+        v.save(&path).unwrap();
+        assert_eq!(VolumeIndex::load(&path, 'C').unwrap().len(), 2);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// FC-02: the audit's 21-byte cache with an overflowing timestamp used to panic (and abort).

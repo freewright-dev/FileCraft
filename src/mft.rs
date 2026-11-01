@@ -1,7 +1,7 @@
 //! Fast indexer: reads the NTFS master file table straight from the volume, the same technique
 //! Everything uses. Opening `\\.\C:` for reading requires administrator rights.
 
-use crate::index::{ATTR_DIRECTORY, NONE, Source, VolumeBuilder, VolumeIndex};
+use crate::index::{ATTR_DIRECTORY, NONE, Source, VolumeBuilder, VolumeIndex, valid_name};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -434,8 +434,11 @@ fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> VolumeIndex
             continue;
         }
         let r = &recs[i];
+        // POSIX-namespace names may hold characters Win32 paths cannot; keep the path structure
+        // intact (and the saved cache loadable) by substituting them (FC-17).
         let name = names
             .get(r.name_off as usize..r.name_off as usize + r.name_len as usize)
+            .filter(|n| valid_name(n))
             .unwrap_or("?");
         // Bit 0x10000000 in $STANDARD_INFORMATION marks directories but is not a Win32 attribute.
         let mut attrs = r.attrs & 0x0FFF_FFFF;

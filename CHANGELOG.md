@@ -115,3 +115,7 @@ All notable changes to this project are documented here. The format follows
   `a&calc&.txt` or `%VAR%`) can no longer run commands. The editor is resolved on `PATH` and
   started directly; `.cmd` shims such as VS Code's `code` still work. Quoted editor paths with
   spaces are now accepted (FC-01).
+- A rewritten index cache can no longer give an entry a name such as `..\..\Windows\win.ini`, under
+  which a harmless-looking row would preview, edit, save or open another file. Loading rejects
+  names that are empty, `.`, `..` or contain `\`, `/` or NUL. Show in folder refuses paths with a
+  `"`, which could end Explorer's argument and add switches of its own (FC-17).
