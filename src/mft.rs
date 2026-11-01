@@ -121,7 +121,7 @@ pub fn read_volume(
         anyhow::bail!("$MFT data runs covered {frn} of {record_count} records");
     }
 
-    Ok(build(letter, &recs, &names, start))
+    build(letter, &recs, &names, start)
 }
 
 #[cfg(not(windows))]
@@ -382,7 +382,7 @@ fn runs_cover_records(runs: &[(Option<u64>, u64)], cluster: u64, record_size: u6
 }
 
 /// Keeps records reachable from the root through valid parents and turns them into an index.
-fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> VolumeIndex {
+fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> anyhow::Result<VolumeIndex> {
     const UNKNOWN: u8 = 0;
     const VALID: u8 = 1;
     const INVALID: u8 = 2;
@@ -448,7 +448,8 @@ fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> VolumeIndex
         let size = if r.is_dir { 0 } else { r.size };
         builder.push(name, ids[r.parent as usize], attrs, size, r.mtime);
     }
-    builder.finish(Source::Mft, start.elapsed())
+    builder.check_capacity()?;
+    Ok(builder.finish(Source::Mft, start.elapsed()))
 }
 
 #[cfg(test)]
@@ -617,7 +618,7 @@ mod tests {
             parse_record(rec, *frn, &mut recs, &mut names);
         }
 
-        let v = build('C', &recs, &names, Instant::now());
+        let v = build('C', &recs, &names, Instant::now()).unwrap();
         assert_eq!(v.len(), 2);
         let report = v.by_name.iter().copied().find(|&i| v.name(i) == "Report final.docx").unwrap();
         assert_eq!(v.full_path(report), r"C:\Users\Report final.docx");

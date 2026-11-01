@@ -1,6 +1,6 @@
 //! Fallback indexer: a parallel directory walk (works without administrator rights).
 
-use crate::index::{ATTR_DIRECTORY, ATTR_REPARSE_POINT, Source, VolumeBuilder, VolumeIndex, thread_count};
+use crate::index::{ATTR_DIRECTORY, ATTR_REPARSE_POINT, NONE, Source, VolumeBuilder, VolumeIndex, thread_count};
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded, unbounded};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -18,6 +18,8 @@ const SHARED_QUEUE_LIMIT: usize = 4096;
 /// State every worker shares.
 struct Shared<'a> {
     next_id: AtomicU32,
+    /// Set when ids ran out: entry ids are `u32` and `NONE` is reserved (MIN-04).
+    out_of_ids: AtomicBool,
     /// Folders found but not finished, wherever they wait.
     pending: AtomicUsize,
     skipped: &'a AtomicUsize,
@@ -46,7 +48,13 @@ pub fn walk_volume(
     let start = Instant::now();
     std::fs::read_dir(root)?; // fail early when the drive is not readable
 
-    let shared = Shared { next_id: AtomicU32::new(1), pending: AtomicUsize::new(1), skipped, cancel };
+    let shared = Shared {
+        next_id: AtomicU32::new(1),
+        out_of_ids: AtomicBool::new(false),
+        pending: AtomicUsize::new(1),
+        skipped,
+        cancel,
+    };
     let (work_tx, work_rx) = unbounded::<(PathBuf, u32)>();
     let (out_tx, out_rx) = bounded::<Vec<Raw>>(QUEUED_BATCHES);
     work_tx.send((root.to_path_buf(), 0))?;
@@ -96,6 +104,10 @@ pub fn walk_volume(
     if cancel.load(Ordering::Relaxed) {
         anyhow::bail!("cancelled");
     }
+    if shared.out_of_ids.load(Ordering::Relaxed) {
+        anyhow::bail!("the drive has more than {} entries", NONE - 1);
+    }
+    builder.check_capacity()?;
     Ok(builder.finish(Source::Walk, start.elapsed()))
 }
 
@@ -116,7 +128,7 @@ fn read_one_dir(
     };
     let mut batch = Vec::new();
     for entry in rd {
-        if shared.cancel.load(Ordering::Relaxed) {
+        if shared.cancel.load(Ordering::Relaxed) || shared.out_of_ids.load(Ordering::Relaxed) {
             return;
         }
         let Ok(entry) = entry else {
@@ -131,6 +143,11 @@ fn read_one_dir(
         };
         let (attrs, size, mtime) = attributes(&meta);
         let idx = shared.next_id.fetch_add(1, Ordering::Relaxed);
+        // The counter would wrap to the root's id; stop instead (the walk then fails).
+        if idx == NONE || idx == 0 {
+            shared.out_of_ids.store(true, Ordering::Relaxed);
+            break;
+        }
         if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
             shared.pending.fetch_add(1, Ordering::AcqRel);
             let job = (entry.path(), idx);
@@ -223,12 +240,41 @@ mod tests {
 
     /// Runs `read_one_dir` alone and returns the batches it sent.
     fn read_alone(dir: &Path, skipped: &AtomicUsize, cancel: &AtomicBool) -> Vec<Vec<Raw>> {
-        let shared = Shared { next_id: AtomicU32::new(1), pending: AtomicUsize::new(1), skipped, cancel };
+        read_alone_from(dir, 1, skipped, cancel).0
+    }
+
+    /// Like `read_alone`, handing out ids from `first_id`; also says whether ids ran out.
+    fn read_alone_from(dir: &Path, first_id: u32, skipped: &AtomicUsize, cancel: &AtomicBool) -> (Vec<Vec<Raw>>, bool) {
+        let shared = Shared {
+            next_id: AtomicU32::new(first_id),
+            out_of_ids: AtomicBool::new(false),
+            pending: AtomicUsize::new(1),
+            skipped,
+            cancel,
+        };
         let (work_tx, _work_rx) = unbounded();
         let (out_tx, out_rx) = unbounded();
         read_one_dir(dir, 0, &shared, &mut Vec::new(), &work_tx, &out_tx);
         drop(out_tx);
-        out_rx.iter().collect()
+        (out_rx.iter().collect(), shared.out_of_ids.load(Ordering::Relaxed))
+    }
+
+    /// MIN-04: entry ids are `u32`. The counter used to wrap to 0, the root's id, after 2^32
+    /// entries; it now stops at the last valid id and the walk fails.
+    #[test]
+    fn ids_never_wrap_to_the_root() {
+        let dir = std::env::temp_dir().join(format!("filecraft-walk-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("{i}.txt")), "").unwrap();
+        }
+        let (batches, out_of_ids) = read_alone_from(&dir, NONE - 2, &AtomicUsize::new(0), &AtomicBool::new(false));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ids: Vec<u32> = batches.iter().flatten().map(|r| r.idx).collect();
+        assert!(out_of_ids);
+        assert_eq!(ids, [NONE - 2, NONE - 1]);
     }
 
     /// MIN-02: unreadable folders are counted instead of silently missing.

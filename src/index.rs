@@ -208,6 +208,10 @@ pub struct VolumeBuilder {
     names: String,
     lower: String,
     entries: Vec<Entry>,
+    /// Largest size of each name arena: entries address names with `u32` offsets.
+    arena_limit: usize,
+    /// Set once a name did not fit; see [`VolumeBuilder::check_capacity`].
+    full: bool,
 }
 
 impl VolumeBuilder {
@@ -218,6 +222,8 @@ impl VolumeBuilder {
             names: String::with_capacity(1 << 20),
             lower: String::with_capacity(1 << 20),
             entries: Vec::with_capacity(1 << 16),
+            arena_limit: u32::MAX as usize,
+            full: false,
         };
         let root = format!("{letter}:");
         b.push(&root, NONE, ATTR_DIRECTORY, 0, 0);
@@ -234,15 +240,33 @@ impl VolumeBuilder {
         self.lower.reserve(entries * 16);
     }
 
+    /// Fails when some name did not fit the name arenas (more than 4 GiB of names), instead of
+    /// letting their `u32` offsets wrap onto other names (MIN-04).
+    pub fn check_capacity(&self) -> io::Result<()> {
+        if self.full {
+            return Err(io::Error::other("the drive has more than 4 GiB of file names"));
+        }
+        Ok(())
+    }
+
     fn make_entry(&mut self, name: &str, parent: u32, attrs: u32, size: u64, mtime: i64) -> Entry {
         let name = truncate_name(name);
+        // ASCII names (nearly all) are lowercased in place; others may change length.
+        let lowered = (!name.is_ascii()).then(|| name.to_lowercase());
+        let lowered_len = lowered.as_ref().map_or(name.len(), String::len);
+        if self.full
+            || self.names.len() + name.len() > self.arena_limit
+            || self.lower.len() + lowered_len > self.arena_limit
+        {
+            self.full = true;
+            return Entry { parent, attrs, size, mtime, ..Entry::default() };
+        }
         let name_off = self.names.len() as u32;
         self.names.push_str(name);
         let lower_off = self.lower.len() as u32;
-        if name.is_ascii() {
-            self.lower.extend(name.bytes().map(|b| b.to_ascii_lowercase() as char));
-        } else {
-            self.lower.push_str(&name.to_lowercase());
+        match &lowered {
+            Some(l) => self.lower.push_str(l),
+            None => self.lower.extend(name.bytes().map(|b| b.to_ascii_lowercase() as char)),
         }
         // Lowercasing can lengthen a name; cut on a character boundary so the range stays valid.
         let mut lower_end = self.lower.len().min(lower_off as usize + u16::MAX as usize);
@@ -954,6 +978,19 @@ pub mod tests {
         let v = b.finish(Source::Walk, Duration::ZERO);
         let huge = v.by_name.iter().copied().find(|&i| v.name(i) == "huge").unwrap();
         assert_eq!(v.entry(huge).size, u64::MAX);
+    }
+
+    /// MIN-04: names address the arenas with `u32` offsets, which used to wrap silently past
+    /// 4 GiB. A builder that runs out of arena space now reports it instead.
+    #[test]
+    fn name_arena_overflow_is_reported() {
+        let mut b = VolumeBuilder::new('C');
+        b.arena_limit = 11; // "C:" (2 bytes) is already stored
+        b.push("abcde", 0, 0, 1, 0);
+        assert!(b.check_capacity().is_ok());
+        b.push("fghij", 0, 0, 1, 0);
+        assert!(b.check_capacity().is_err());
+        assert!(b.names.len() <= 11 && b.lower.len() <= 11);
     }
 
     /// FC-12: folder sizes and path ranks used to cost O(depth) per entry (quadratic on a deep

@@ -102,6 +102,9 @@ All notable changes to this project are documented here. The format follows
   the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
   scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
   only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
+- Indexing fails with a clear error instead of corrupting the index when a drive exceeds the
+  index format's limits: about 4 billion entries (the folder scan's id counter used to wrap to the
+  root's id) or 4 GiB of file names (offsets used to wrap onto other names) (MIN-04).
 - The cache of unfiltered results (an empty query) holds the snapshot it was computed on instead of
   only its address, so a newer snapshot allocated at a reused address can never be shown the old
   results (MIN-04).
