@@ -82,6 +82,9 @@ All notable changes to this project are documented here. The format follows
   made most of them fail under load. Saves use unique, exclusively created and synced staging
   files. A cancelled indexing job no longer replaces the cache, and an older snapshot never
   replaces a newer one from another instance. Leftover staging files are cleaned up (FC-07).
+- A cache stamped with a build time more than five minutes in the future (clock skew, or a
+  corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
+  and its new index never written back, silently (FC-11).
 - `cargo deny check` passes again: the lockfile moves `clipboard-win` from the yanked 5.4.1 to
   5.4.3, which the CI supply-chain job rejected (FC-16).
 

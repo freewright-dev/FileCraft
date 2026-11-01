@@ -705,11 +705,18 @@ fn remove_stale_staging(dir: &Path, stem: &str) {
 }
 
 /// Build time (seconds since 1970) recorded in the cache at `path`, if it is a FileCraft cache.
+/// A stamp further ahead of the clock than [`CLOCK_SKEW_SECS`] is not a newer snapshot (clock
+/// skew or corruption), so it is reported as absent and cannot block the save (FC-11).
 fn cached_build_secs(path: &Path) -> Option<u64> {
     let mut header = [0u8; 21];
     fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
-    (&header[..8] == CACHE_MAGIC).then(|| u64::from_le_bytes(header[13..21].try_into().unwrap()))
+    let secs = (&header[..8] == CACHE_MAGIC).then(|| u64::from_le_bytes(header[13..21].try_into().unwrap()))?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    (secs <= now.saturating_add(CLOCK_SKEW_SECS)).then_some(secs)
 }
+
+/// How far ahead of the local clock a cache build time may be before it is treated as bogus.
+const CLOCK_SKEW_SECS: u64 = 300;
 
 /// Reads a whole file, refusing one larger than `budget` bytes.
 fn read_with_budget(path: &Path, budget: u64) -> io::Result<Vec<u8>> {
@@ -994,6 +1001,21 @@ pub mod tests {
         assert!(!older.save_unless(&path, &|| false).unwrap());
         assert_eq!(VolumeIndex::load(&path, 'C').unwrap().built_secs(), newer.built_secs());
         assert!(staging_files(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// FC-11: a cache stamped in the future (clock skew, corruption) must not block every later save.
+    #[test]
+    fn future_dated_cache_does_not_block_saves() {
+        let dir = cache_dir("future-cache");
+        let path = dir.join("C.idx");
+        let mut future = sample();
+        future.built_at = SystemTime::now() + Duration::from_secs(86_400);
+        assert!(future.save_unless(&path, &|| false).unwrap());
+
+        let current = sample();
+        assert!(current.save_unless(&path, &|| false).unwrap());
+        assert!(VolumeIndex::load(&path, 'C').unwrap().built_secs() <= current.built_secs() + 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
