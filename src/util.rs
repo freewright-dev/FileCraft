@@ -94,7 +94,9 @@ pub fn format_filetime(ft: i64, offset: i64) -> String {
     if ft <= 0 {
         return String::new();
     }
-    let local = ft + offset - UNIX_EPOCH_TICKS;
+    // Saturating: timestamps and offsets come from the file system and time zone settings, so
+    // extreme values must not overflow (debug panic, FC-19).
+    let local = ft.saturating_add(offset).saturating_sub(UNIX_EPOCH_TICKS);
     let days = local.div_euclid(TICKS_PER_DAY);
     let secs = local.rem_euclid(TICKS_PER_DAY) / TICKS_PER_SEC;
     let (y, m, d) = civil_from_days(days);
@@ -136,6 +138,16 @@ pub fn group_digits(n: usize) -> String {
 mod tests {
     use super::*;
 
+    /// FC-19: a timestamp near `i64::MAX` (settable by any user) panicked in debug builds when a
+    /// positive offset was added to it. Formatting must saturate instead.
+    #[test]
+    fn extreme_timestamps_do_not_overflow() {
+        let _ = format_filetime(i64::MAX, 264_436_543_536);
+        let _ = format_filetime(9_223_371_772_418_232_272, 264_436_543_536);
+        let _ = format_filetime(i64::MAX, i64::MAX);
+        let _ = format_filetime(1, i64::MIN);
+    }
+
     #[test]
     fn formats_values() {
         assert_eq!(format_size(512), "512 B");
@@ -146,6 +158,7 @@ mod tests {
         // 2026-10-13 14:05 UTC
         let ft = UNIX_EPOCH_TICKS + (days_from_civil(2026, 10, 13) * 86_400 + 14 * 3600 + 5 * 60) * TICKS_PER_SEC;
         assert_eq!(format_filetime(ft, 0), "2026-10-13 14:05");
+        assert_eq!(format_filetime(0, 0), "");
         assert_eq!(civil_from_days(days_from_civil(2024, 2, 29)), (2024, 2, 29));
         assert_eq!(parse_date("2024-02-29"), Some((2024, 2, 29)));
         assert_eq!(parse_date("2024-13-01"), None);

@@ -85,6 +85,9 @@ All notable changes to this project are documented here. The format follows
 - Saving an inline edit no longer reads, hashes and backs up the whole file on the UI thread. If
   the file has grown past 8 MB since editing started, the save is refused, even with Overwrite,
   instead of freezing the window and using memory equal to the file's size (FC-13).
+- Extreme file times, which any user can set, and folder sizes that add up past the maximum no
+  longer overflow. Debug builds panicked on the UI thread when such a row was shown; release
+  builds could show a wrong date or a folder size of zero (FC-19).
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

@@ -384,7 +384,7 @@ fn compute_folder_sizes(entries: &mut [Entry]) {
                 break;
             }
             let parent = &mut entries[p as usize];
-            parent.size += e.size;
+            parent.size = parent.size.saturating_add(e.size);
             p = parent.parent;
         }
     }
@@ -838,6 +838,19 @@ pub mod tests {
         assert_eq!(names(&v, &v.by_path), ["big.bin", "docs", "src", "Notes.TXT", "readme.md", "main.rs"]);
         assert_eq!(names(&v, &v.by_size)[5], "big.bin");
         assert_eq!(names(&v, &v.by_date)[0], "big.bin");
+    }
+
+    /// FC-19: folder sizes that add up past `u64::MAX` panicked in debug builds and wrapped in
+    /// release builds. They must saturate.
+    #[test]
+    fn folder_sizes_saturate_instead_of_overflowing() {
+        let mut b = VolumeBuilder::new('C');
+        let dir = b.push("huge", 0, ATTR_DIRECTORY, 0, 0);
+        b.push("a.bin", dir, 0, 1 << 63, 0);
+        b.push("b.bin", dir, 0, 1 << 63, 0);
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        let huge = v.by_name.iter().copied().find(|&i| v.name(i) == "huge").unwrap();
+        assert_eq!(v.entry(huge).size, u64::MAX);
     }
 
     #[test]
