@@ -380,8 +380,16 @@ impl Preview {
 
         let file = match open_for_save(&self.path) {
             Ok(mut file) => {
+                // Read at most one byte past the limit: the file may have grown since it was
+                // previewed, and the whole of it must never be held in memory or backed up.
                 let mut original = Vec::new();
-                file.read_to_end(&mut original).map_err(io_err)?;
+                (&file).take(EDIT_MAX_BYTES + 1).read_to_end(&mut original).map_err(io_err)?;
+                if original.len() as u64 > EDIT_MAX_BYTES {
+                    return Err(SaveError::Io(format!(
+                        "the file is now larger than {} MB and cannot be saved from the editor",
+                        EDIT_MAX_BYTES / (1024 * 1024)
+                    )));
+                }
                 if !force && self.loaded != Some(FileVersion::of(&file, &original).map_err(io_err)?) {
                     self.conflict = true;
                     return Err(SaveError::Conflict);
@@ -641,6 +649,25 @@ mod tests {
 
         let p = Preview::load_for_edit(&path);
         assert!(!p.can_edit() && !p.needs_full_read());
+        fs::remove_file(path).unwrap();
+    }
+
+    /// FC-13: saving must never read a file past the edit limit, even when it grew after editing
+    /// began; it refuses instead of reading and backing up the whole file on the UI thread.
+    #[test]
+    fn save_never_reads_past_the_edit_limit() {
+        let path = temp("save-grows.txt", b"small");
+        let mut p = Preview::load(&path, false);
+        p.begin_edit().unwrap();
+        p.buffer.push('!');
+        let big = 9 * 1024 * 1024;
+        fs::write(&path, vec![b'b'; big]).unwrap();
+
+        for force in [false, true] {
+            let refused = matches!(p.save(force), Err(SaveError::Io(ref m)) if m.contains("larger than 8 MB"));
+            assert!(refused, "save(force={force}) must refuse an oversized file");
+        }
+        assert_eq!(fs::metadata(&path).unwrap().len(), big as u64);
         fs::remove_file(path).unwrap();
     }
 

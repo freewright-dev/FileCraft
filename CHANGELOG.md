@@ -82,6 +82,9 @@ All notable changes to this project are documented here. The format follows
   made most of them fail under load. Saves use unique, exclusively created and synced staging
   files. A cancelled indexing job no longer replaces the cache, and an older snapshot never
   replaces a newer one from another instance. Leftover staging files are cleaned up (FC-07).
+- Saving an inline edit no longer reads, hashes and backs up the whole file on the UI thread. If
+  the file has grown past 8 MB since editing started, the save is refused, even with Overwrite,
+  instead of freezing the window and using memory equal to the file's size (FC-13).
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
