@@ -32,6 +32,9 @@ All notable changes to this project are documented here. The format follows
   dependency policy in `deny.toml` checks the Windows graph, keeps advisory checks on, allows
   only reviewed licenses and crates.io sources. A lint policy in `Cargo.toml` requires
   `// SAFETY:` comments on `unsafe` blocks (MIN-03).
+- CI also runs the tests in the release profile (overflow checks off) and runs every week, so new
+  advisories and yanked crates show up between pull requests. Third-party actions are pinned to
+  commit SHAs, and Dependabot proposes updates (MIN-04).
 
 ### Fixed
 
