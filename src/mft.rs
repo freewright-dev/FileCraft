@@ -24,6 +24,16 @@ const RECORD_IN_USE: u16 = 0x1;
 const RECORD_IS_DIRECTORY: u16 = 0x2;
 const REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
+/// A further hard link of a file record: another non-DOS `$FILE_NAME` with its own parent and
+/// name. The folder scan lists every link, so the NTFS index does too (MIN-04).
+#[derive(Clone, Copy)]
+struct Link {
+    frn: usize,
+    parent: u64,
+    name_off: u32,
+    name_len: u16,
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rec {
     parent: u64,
@@ -87,6 +97,7 @@ pub fn read_volume(
     total.store(record_count, Ordering::Relaxed);
     let mut recs = vec![Rec::default(); record_count];
     let mut names = String::with_capacity(record_count * 16);
+    let mut links = Vec::new();
     let mut buf = vec![0u8; READ_CHUNK];
     let mut frn = 0usize;
 
@@ -109,7 +120,7 @@ pub fn read_volume(
                 .min((record_count - frn) as u64 * record_size as u64) as usize;
             read_exact_at(&volume, &mut buf[..want], offset)?;
             for record in buf[..want].chunks_exact_mut(record_size) {
-                parse_record(record, frn, &mut recs, &mut names);
+                parse_record(record, frn, &mut recs, &mut names, &mut links);
                 frn += 1;
             }
             offset += want as u64;
@@ -121,7 +132,7 @@ pub fn read_volume(
         anyhow::bail!("$MFT data runs covered {frn} of {record_count} records");
     }
 
-    build(letter, &recs, &names, start)
+    build(letter, &recs, &names, &links, start)
 }
 
 #[cfg(not(windows))]
@@ -246,7 +257,7 @@ fn resident_value(attr: &[u8]) -> Option<&[u8]> {
     attr.get(off..off.checked_add(len)?)
 }
 
-fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut String) {
+fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut String, links: &mut Vec<Link>) {
     // The flags (0x16) and base reference (0x20) below must lie inside the record.
     if record.len() < RECORD_HEADER_LEN || !apply_fixup(record) {
         return;
@@ -282,7 +293,9 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
                     continue;
                 }
                 let better = !rec.has_name || (rec.name_ns == NAMESPACE_DOS && namespace != NAMESPACE_DOS);
-                if !better {
+                // A second long name is another hard link; DOS names are only short aliases.
+                let another_link = !better && namespace != NAMESPACE_DOS;
+                if !better && !another_link {
                     continue;
                 }
                 let units: Vec<u16> = v[0x42..0x42 + name_chars * 2]
@@ -295,12 +308,19 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
                 if names.len() + name.len() > u32::MAX as usize {
                     continue; // name offsets are 32-bit
                 }
-                rec.name_off = names.len() as u32;
-                rec.name_len = name.len().min(u16::MAX as usize) as u16;
+                let name_off = names.len() as u32;
+                let name_len = name.len().min(u16::MAX as usize) as u16;
                 names.push_str(&name);
+                let parent = u64_at(v, 0) & REF_MASK;
+                if another_link {
+                    links.push(Link { frn: target, parent, name_off, name_len });
+                    continue;
+                }
+                rec.name_off = name_off;
+                rec.name_len = name_len;
                 rec.name_ns = namespace;
                 rec.has_name = true;
-                rec.parent = u64_at(v, 0) & REF_MASK;
+                rec.parent = parent;
             }
             ATTR_DATA if attr_name_len == 0 => {
                 if non_resident {
@@ -382,7 +402,7 @@ fn runs_cover_records(runs: &[(Option<u64>, u64)], cluster: u64, record_size: u6
 }
 
 /// Keeps records reachable from the root through valid parents and turns them into an index.
-fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> anyhow::Result<VolumeIndex> {
+fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant) -> anyhow::Result<VolumeIndex> {
     const UNKNOWN: u8 = 0;
     const VALID: u8 = 1;
     const INVALID: u8 = 2;
@@ -427,26 +447,29 @@ fn build(letter: char, recs: &[Rec], names: &str, start: Instant) -> anyhow::Res
         }
     }
 
+    // POSIX-namespace names may hold characters Win32 paths cannot; keep the path structure
+    // intact (and the saved cache loadable) by substituting them (FC-17).
+    let name_at = |off: u32, len: u16| names.get(off as usize..off as usize + len as usize).filter(|n| valid_name(n)).unwrap_or("?");
+    // Bit 0x10000000 in $STANDARD_INFORMATION marks directories but is not a Win32 attribute.
+    let attrs_of = |r: &Rec| (r.attrs & 0x0FFF_FFFF) | if r.is_dir { ATTR_DIRECTORY } else { 0 };
+
     let mut builder = VolumeBuilder::new(letter);
-    builder.reserve(next as usize);
+    builder.reserve(next as usize + links.len());
     for i in 0..n {
         if ids[i] == NONE || i == ROOT_RECORD {
             continue;
         }
         let r = &recs[i];
-        // POSIX-namespace names may hold characters Win32 paths cannot; keep the path structure
-        // intact (and the saved cache loadable) by substituting them (FC-17).
-        let name = names
-            .get(r.name_off as usize..r.name_off as usize + r.name_len as usize)
-            .filter(|n| valid_name(n))
-            .unwrap_or("?");
-        // Bit 0x10000000 in $STANDARD_INFORMATION marks directories but is not a Win32 attribute.
-        let mut attrs = r.attrs & 0x0FFF_FFFF;
-        if r.is_dir {
-            attrs |= ATTR_DIRECTORY;
-        }
         let size = if r.is_dir { 0 } else { r.size };
-        builder.push(name, ids[r.parent as usize], attrs, size, r.mtime);
+        builder.push(name_at(r.name_off, r.name_len), ids[r.parent as usize], attrs_of(r), size, r.mtime);
+    }
+    // Further hard links of indexed files, under folders that are indexed too. Pushed after
+    // every record, so the ids above still match the builder's.
+    for l in links {
+        let parent = usize::try_from(l.parent).unwrap_or(usize::MAX);
+        let Some(r) = recs.get(l.frn).filter(|r| !r.is_dir && ids[l.frn] != NONE) else { continue };
+        let Some(&parent_id) = ids.get(parent).filter(|&&id| id != NONE) else { continue };
+        builder.push(name_at(l.name_off, l.name_len), parent_id, attrs_of(r), r.size, r.mtime);
     }
     builder.check_capacity()?;
     Ok(builder.finish(Source::Mft, start.elapsed()))
@@ -586,7 +609,7 @@ mod tests {
         short[0x16..0x18].copy_from_slice(&RECORD_IN_USE.to_le_bytes()); // so the base reference at 0x20 is read
         short[0x1E..0x20].copy_from_slice(&[0, 0]); // matches the zero sequence number at 8
         let mut recs = vec![Rec::default(); 4];
-        parse_record(&mut short, 1, &mut recs, &mut String::new());
+        parse_record(&mut short, 1, &mut recs, &mut String::new(), &mut Vec::new());
         assert!(!recs[1].in_use);
     }
 
@@ -595,6 +618,44 @@ mod tests {
         let mut rec = record(RECORD_IN_USE, 0, &[]);
         rec[1022] ^= 0xFF;
         assert!(!apply_fixup(&mut rec));
+    }
+
+    /// MIN-04: a file with several hard links is listed under each of them, as the folder scan
+    /// lists it. Only one name per record used to be kept. DOS aliases are not extra links, and
+    /// links under folders that are not indexed ($Extend) are dropped.
+    #[test]
+    fn hard_links_are_listed_under_every_name() {
+        let mut recs = vec![Rec::default(); 20];
+        let mut names = String::new();
+        let mut links = Vec::new();
+        let dir = RECORD_IN_USE | RECORD_IS_DIRECTORY;
+        let mut raw = [
+            (5, record(dir, 0, &[standard_info(1, 0), file_name(5, ".", 3)])),
+            (16, record(dir, 0, &[standard_info(2, 0), file_name(5, "Users", 3)])),
+            (
+                17,
+                record(
+                    RECORD_IN_USE,
+                    0,
+                    &[
+                        standard_info(3, 0x20),
+                        file_name(16, "a.txt", 3),
+                        file_name(5, "B~1.TXT", 2),
+                        file_name(5, "b link.txt", 1),
+                        file_name(11, "hidden link", 1),
+                    ],
+                ),
+            ),
+        ];
+        for (frn, rec) in raw.iter_mut() {
+            parse_record(rec, *frn, &mut recs, &mut names, &mut links);
+        }
+        assert_eq!(links.len(), 2);
+
+        let v = build('C', &recs, &names, &links, Instant::now()).unwrap();
+        let mut paths: Vec<String> = v.by_name.iter().map(|&i| v.full_path(i)).collect();
+        paths.sort();
+        assert_eq!(paths, [r"C:\Users", r"C:\Users\a.txt", r"C:\b link.txt"]);
     }
 
     #[test]
@@ -614,11 +675,13 @@ mod tests {
             // Child of a metadata file ($Extend = 11) must be dropped.
             (19, record(RECORD_IN_USE, 0, &[standard_info(4, 0), file_name(11, "$ObjId", 3)])),
         ];
+        let mut links = Vec::new();
         for (frn, rec) in raw.iter_mut() {
-            parse_record(rec, *frn, &mut recs, &mut names);
+            parse_record(rec, *frn, &mut recs, &mut names, &mut links);
         }
+        assert!(links.is_empty(), "a DOS alias is not another link");
 
-        let v = build('C', &recs, &names, Instant::now()).unwrap();
+        let v = build('C', &recs, &names, &links, Instant::now()).unwrap();
         assert_eq!(v.len(), 2);
         let report = v.by_name.iter().copied().find(|&i| v.name(i) == "Report final.docx").unwrap();
         assert_eq!(v.full_path(report), r"C:\Users\Report final.docx");
