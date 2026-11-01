@@ -575,6 +575,34 @@ pub struct Response {
     pub elapsed: Duration,
 }
 
+/// Unfiltered result lists, one per sort order, for the snapshot they were computed on. The
+/// snapshot's volumes are held, not just their addresses: once a volume is freed its address can
+/// be reused by a newer one, which would then be served the old results (MIN-04).
+#[derive(Default)]
+struct EverythingCache {
+    snapshot: Vec<Arc<VolumeIndex>>,
+    lists: Vec<(Sort, Arc<Vec<Hit>>)>,
+}
+
+impl EverythingCache {
+    /// Forgets the cached lists unless `volumes` is the snapshot they belong to.
+    fn use_snapshot(&mut self, volumes: &[Arc<VolumeIndex>]) {
+        let same = self.snapshot.len() == volumes.len() && self.snapshot.iter().zip(volumes).all(|(a, b)| Arc::ptr_eq(a, b));
+        if !same {
+            self.snapshot = volumes.to_vec();
+            self.lists.clear();
+        }
+    }
+
+    fn get(&self, sort: Sort) -> Option<Arc<Vec<Hit>>> {
+        self.lists.iter().find(|(s, _)| *s == sort).map(|(_, h)| Arc::clone(h))
+    }
+
+    fn insert(&mut self, sort: Sort, hits: Arc<Vec<Hit>>) {
+        self.lists.push((sort, hits));
+    }
+}
+
 /// Runs searches on a background thread; newer requests cancel older ones.
 pub struct Searcher {
     tx: Sender<Request>,
@@ -595,7 +623,7 @@ impl Searcher {
             .spawn(move || {
                 // Unfiltered result lists are large and expensive to merge; reuse them while the
                 // snapshot is unchanged (e.g. when the query is cleared again).
-                let mut everything: Vec<(Vec<usize>, Sort, Arc<Vec<Hit>>)> = Vec::new();
+                let mut everything = EverythingCache::default();
                 while let Ok(mut req) = rx.recv() {
                     while let Ok(newer) = rx.try_recv() {
                         req = newer;
@@ -603,23 +631,20 @@ impl Searcher {
                     let start = Instant::now();
                     let generation = req.generation;
                     let cancelled = || latest_bg.load(AtomicOrdering::Relaxed) != generation;
-                    let snapshot: Vec<usize> = req.index.volumes.iter().map(|v| Arc::as_ptr(v) as usize).collect();
-                    everything.retain(|(s, _, _)| *s == snapshot);
+                    everything.use_snapshot(&req.index.volumes);
 
                     let (hits, error) = match Query::parse(&req.text, req.options) {
-                        Ok(q) if q.is_empty() => {
-                            match everything.iter().find(|(_, sort, _)| *sort == req.sort) {
-                                Some((_, _, hits)) => (Arc::clone(hits), None),
-                                None => match search(&req.index, &q, req.sort, &cancelled) {
-                                    Some(h) => {
-                                        let h = Arc::new(h);
-                                        everything.push((snapshot, req.sort, Arc::clone(&h)));
-                                        (h, None)
-                                    }
-                                    None => continue,
-                                },
-                            }
-                        }
+                        Ok(q) if q.is_empty() => match everything.get(req.sort) {
+                            Some(hits) => (hits, None),
+                            None => match search(&req.index, &q, req.sort, &cancelled) {
+                                Some(h) => {
+                                    let h = Arc::new(h);
+                                    everything.insert(req.sort, Arc::clone(&h));
+                                    (h, None)
+                                }
+                                None => continue,
+                            },
+                        },
                         Ok(q) => match search(&req.index, &q, req.sort, &cancelled) {
                             Some(h) => (Arc::new(h), None),
                             None => continue,
@@ -657,6 +682,24 @@ impl Searcher {
 mod tests {
     use super::*;
     use crate::index::tests::sample;
+
+    /// MIN-04: the cache keeps its snapshot alive (so its address cannot be reused by a newer
+    /// one) and drops the cached lists when a different snapshot arrives.
+    #[test]
+    fn unfiltered_cache_holds_its_snapshot() {
+        let old = Arc::new(sample());
+        let mut cache = EverythingCache::default();
+        cache.use_snapshot(std::slice::from_ref(&old));
+        cache.insert(Sort::default(), Arc::new(Vec::new()));
+        assert_eq!(Arc::strong_count(&old), 2, "the cache must hold the snapshot");
+        cache.use_snapshot(std::slice::from_ref(&old));
+        assert!(cache.get(Sort::default()).is_some());
+
+        let new = Arc::new(sample());
+        cache.use_snapshot(std::slice::from_ref(&new));
+        assert!(cache.get(Sort::default()).is_none());
+        assert_eq!(Arc::strong_count(&old), 1);
+    }
 
     fn run(text: &str, opts: SearchOptions, sort: Sort) -> Result<Vec<String>, String> {
         let index = Index::default().with_volume(Arc::new(sample()));

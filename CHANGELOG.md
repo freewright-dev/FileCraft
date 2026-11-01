@@ -102,6 +102,9 @@ All notable changes to this project are documented here. The format follows
   the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
   scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
   only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
+- The cache of unfiltered results (an empty query) holds the snapshot it was computed on instead of
+  only its address, so a newer snapshot allocated at a reused address can never be shown the old
+  results (MIN-04).
 - Failures of Open and Run as admin report what ShellExecute returned (for example "no application
   is associated with this kind of file") instead of an unrelated last OS error (MIN-04).
 - On a volume whose `$MFT` is fragmented enough that its run list continues in an
