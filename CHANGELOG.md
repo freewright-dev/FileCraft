@@ -119,3 +119,11 @@ All notable changes to this project are documented here. The format follows
   which a harmless-looking row would preview, edit, save or open another file. Loading rejects
   names that are empty, `.`, `..` or contain `\`, `/` or NUL. Show in folder refuses paths with a
   `"`, which could end Explorer's argument and add switches of its own (FC-17).
+- An instance running as administrator no longer trusts state that unelevated programs of the same
+  user can change (FC-18):
+  - It asks before running the external editor command, which comes from saved settings or the
+    environment, and shows the program it resolves to. It asks once per command per session.
+  - Cache saves, the staging cleanup and save backups refuse to write when `%LOCALAPPDATA%\FileCraft`,
+    `index` or `backup` is a junction or symbolic link, which could aim them at a protected folder.
+  The UI still runs elevated. Splitting the NTFS reader into a separate privileged helper remains
+  the long-term fix.

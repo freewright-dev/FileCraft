@@ -559,6 +559,43 @@ pub fn data_dir() -> PathBuf {
         .join("FileCraft")
 }
 
+/// Creates `dir` if needed and checks that neither it nor any of its ancestors inside
+/// [`data_dir`] is a junction, symbolic link or other reparse point. The data folder is writable
+/// by unelevated code of the same user, which could otherwise aim an elevated instance's cache
+/// writes, staging cleanup and backups at a protected folder (FC-18).
+pub fn ensure_own_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let base = data_dir();
+    let mut cur = Some(dir);
+    let mut first = true;
+    while let Some(d) = cur {
+        if !first && !d.starts_with(&base) {
+            break;
+        }
+        first = false;
+        if is_reparse_point(&fs::symlink_metadata(d)?) {
+            return Err(io::Error::other(format!(
+                "{} is a link or junction; FileCraft does not write through it",
+                d.display()
+            )));
+        }
+        cur = d.parent();
+    }
+    Ok(())
+}
+
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & ATTR_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
 pub fn cache_path(letter: char) -> PathBuf {
     data_dir().join("index").join(format!("{letter}.idx"))
 }
@@ -582,7 +619,7 @@ impl VolumeIndex {
     /// already holds a snapshot built later (by another instance): the newest snapshot wins.
     pub fn save_unless(&self, path: &Path, superseded: &dyn Fn() -> bool) -> io::Result<bool> {
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        fs::create_dir_all(dir)?;
+        ensure_own_dir(dir)?;
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         remove_stale_staging(dir, &stem);
         let (tmp, file) = create_staging(dir, &stem)?;
@@ -1011,6 +1048,31 @@ pub mod tests {
         let err = result.err().unwrap_or_else(|| panic!("{label}: malformed cache was accepted"));
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{label}: {err}");
         err
+    }
+
+    /// Makes `link` a directory junction to `target` (no privilege needed, unlike symlinks).
+    #[cfg(windows)]
+    pub fn junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+        assert!(out.status.success(), "mklink failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// FC-18: a junction planted on the cache folder used to redirect cache writes (and the
+    /// staging cleanup) of an elevated instance into whatever folder it pointed at.
+    #[cfg(windows)]
+    #[test]
+    fn cache_saves_do_not_write_through_junctions() {
+        let dir = cache_dir("junction");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = dir.join("link");
+        junction(&link, &target);
+
+        let err = sample().save(&link.join("C.idx")).unwrap_err();
+        assert!(err.to_string().contains("link or junction"), "{err}");
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// FC-17: a cache entry whose name is a path (`..\..\Windows\win.ini`) or not a usable path

@@ -104,6 +104,19 @@ pub fn default_editor() -> String {
         .unwrap_or_else(|| "notepad".to_string())
 }
 
+/// The program `editor` would start, as `edit_externally` resolves it.
+pub fn editor_program(editor: &str) -> io::Result<std::path::PathBuf> {
+    let program = split_command_line(editor).into_iter().next().unwrap_or_else(|| "notepad".to_string());
+    #[cfg(windows)]
+    {
+        resolve_program(&program)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(program.into())
+    }
+}
+
 /// Launches `editor` (a command line such as `code -n`) with the file appended.
 pub fn edit_externally(editor: &str, path: &Path) -> io::Result<()> {
     editor_command(editor, path)?.spawn().map(|_| ())

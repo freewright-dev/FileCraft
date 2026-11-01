@@ -504,7 +504,7 @@ fn write_in_place(file: &mut fs::File, name: &str, old: &[u8], new: &[u8], backu
 
 fn write_backup(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    fs::create_dir_all(dir)?;
+    crate::index::ensure_own_dir(dir)?;
     loop {
         let path = dir.join(format!("{}-{}-{name}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let mut file = match fs::File::options().write(true).create_new(true).open(&path) {
@@ -650,6 +650,23 @@ mod tests {
         let p = Preview::load_for_edit(&path);
         assert!(!p.can_edit() && !p.needs_full_read());
         fs::remove_file(path).unwrap();
+    }
+
+    /// FC-18: backups are never written through a junction planted on the backup folder.
+    #[cfg(windows)]
+    #[test]
+    fn backups_do_not_write_through_junctions() {
+        let dir = std::env::temp_dir().join(format!("filecraft-backup-junction-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = dir.join("link");
+        crate::index::tests::junction(&link, &target);
+
+        assert!(write_backup(&link, "f.txt", b"secret").is_err());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// FC-15: with the verbatim path the app now passes, `report.txt.` is previewed and saved
