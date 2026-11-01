@@ -78,7 +78,9 @@ first frame.
   while you are editing, saving is refused too (even with Overwrite), so the file is not read or
   backed up in full on the interface thread.
 - If the file was changed, replaced or deleted on disk after you started editing, saving stops
-  and offers **Overwrite** or **Reload from disk**. Overwrite recreates a deleted file.
+  and offers **Overwrite** or **Reload from disk**. The message says which of the three happened
+  and what Overwrite does: replace the other changes, write into the file that replaced yours,
+  or create a deleted file again.
 - Saving writes into the existing file, so its permissions, attributes and hard links are kept.
   A copy of the original is kept in `%LOCALAPPDATA%\FileCraft\backup` until the write finishes;
   if a save fails and the original cannot be restored, the error names that copy.

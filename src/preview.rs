@@ -46,8 +46,32 @@ pub struct ImagePreview {
 
 pub enum SaveError {
     /// The file was modified, replaced or deleted on disk after it was loaded.
-    Conflict,
+    Conflict(Conflict),
     Io(String),
+}
+
+/// How the file on disk differs from the one being edited.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Conflict {
+    /// Same file, different content.
+    Changed,
+    /// A different file now has this name (renamed over, or deleted and recreated).
+    Replaced,
+    /// Nothing has this name any more.
+    Deleted,
+}
+
+impl Conflict {
+    /// What happened, and what Overwrite would do about it (MIN-04).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Conflict::Changed => "This file was changed on disk since you opened it. Overwrite replaces those changes.",
+            Conflict::Replaced => {
+                "A different file has replaced this one on disk since you opened it. Overwrite writes into that file."
+            }
+            Conflict::Deleted => "This file was deleted on disk since you opened it. Overwrite creates it again.",
+        }
+    }
 }
 
 /// Which file was loaded and what it contained; a save compares this with the file on disk.
@@ -118,7 +142,8 @@ pub struct Preview {
     /// Edit buffer with `\n` line endings.
     pub buffer: String,
     pub dirty: bool,
-    pub conflict: bool,
+    /// Set when the last save stopped because the file differs on disk.
+    pub conflict: Option<Conflict>,
     /// Why the file cannot be edited inline, if it cannot.
     pub not_editable: Option<String>,
     /// The complete file as it was read; `None` until the whole file has been read.
@@ -211,7 +236,7 @@ impl Preview {
             editing: false,
             buffer: String::new(),
             dirty: false,
-            conflict: false,
+            conflict: None,
             not_editable: None,
             loaded: None,
             edit_text: None,
@@ -375,14 +400,14 @@ impl Preview {
         };
         self.editing = true;
         self.dirty = false;
-        self.conflict = false;
+        self.conflict = None;
         Ok(())
     }
 
     pub fn cancel_edit(&mut self) {
         self.editing = false;
         self.dirty = false;
-        self.conflict = false;
+        self.conflict = None;
         self.buffer.clear();
     }
 
@@ -413,9 +438,14 @@ impl Preview {
                         EDIT_MAX_BYTES / (1024 * 1024)
                     )));
                 }
-                if !force && self.loaded != Some(FileVersion::of(&file, &original).map_err(io_err)?) {
-                    self.conflict = true;
-                    return Err(SaveError::Conflict);
+                let current = FileVersion::of(&file, &original).map_err(io_err)?;
+                if !force && self.loaded != Some(current) {
+                    let kind = match self.loaded {
+                        Some(loaded) if loaded.id != current.id => Conflict::Replaced,
+                        _ => Conflict::Changed,
+                    };
+                    self.conflict = Some(kind);
+                    return Err(SaveError::Conflict(kind));
                 }
                 let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 write_in_place(&mut file, &name, &original, &out, &backup_dir()).map_err(io_err)?;
@@ -423,8 +453,8 @@ impl Preview {
             }
             // Deleted on disk: only an explicit Overwrite recreates it.
             Err(e) if e.kind() == io::ErrorKind::NotFound && !force => {
-                self.conflict = true;
-                return Err(SaveError::Conflict);
+                self.conflict = Some(Conflict::Deleted);
+                return Err(SaveError::Conflict(Conflict::Deleted));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let mut file = fs::File::options().write(true).create_new(true).open(&self.path).map_err(io_err)?;
@@ -436,7 +466,7 @@ impl Preview {
 
         self.loaded = Some(FileVersion::of(&file, &out).map_err(io_err)?);
         self.dirty = false;
-        self.conflict = false;
+        self.conflict = None;
         let truncated = out.len() > PREVIEW_BYTES;
         let shown = if truncated { truncate_at_char(&self.buffer, PREVIEW_BYTES) } else { self.buffer.clone() };
         self.content = Content::Text { text: shown, truncated };
@@ -793,7 +823,8 @@ mod tests {
         fs::write(&path, b"changed elsewhere\n").unwrap();
         fs::File::options().write(true).open(&path).unwrap().set_modified(SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
         p.buffer = "mine\n".into();
-        assert!(matches!(p.save(false), Err(SaveError::Conflict)));
+        assert!(matches!(p.save(false), Err(SaveError::Conflict(Conflict::Changed))));
+        assert_eq!(p.conflict, Some(Conflict::Changed));
         assert!(p.save(true).is_ok());
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine\n");
     }
@@ -806,7 +837,7 @@ mod tests {
         p.begin_edit().unwrap();
         p.buffer = "replacement".into();
         fs::remove_file(&path).unwrap();
-        assert!(matches!(p.save(false), Err(SaveError::Conflict)));
+        assert!(matches!(p.save(false), Err(SaveError::Conflict(Conflict::Deleted))));
         assert!(!path.exists());
         assert!(p.save(true).is_ok());
         assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
@@ -823,12 +854,13 @@ mod tests {
 
         fs::write(&path, b"ORIGINAL").unwrap();
         fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
-        assert!(matches!(p.save(false), Err(SaveError::Conflict)), "rewritten in place");
+        assert!(matches!(p.save(false), Err(SaveError::Conflict(Conflict::Changed))), "rewritten in place");
 
         let other = temp("same-mtime-other.txt", b"original");
         fs::File::options().write(true).open(&other).unwrap().set_modified(mtime).unwrap();
         fs::rename(&other, &path).unwrap();
-        assert!(matches!(p.save(false), Err(SaveError::Conflict)), "replaced by another file");
+        // MIN-04: a replacement is reported as such, since Overwrite would write into it.
+        assert!(matches!(p.save(false), Err(SaveError::Conflict(Conflict::Replaced))), "replaced by another file");
         assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     }
 

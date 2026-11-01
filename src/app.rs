@@ -382,8 +382,8 @@ impl FileCraftApp {
                 self.set_status(format!("Saved {name}"));
                 true
             }
-            Err(SaveError::Conflict) => {
-                self.set_status("The file changed or was deleted on disk — choose Overwrite or Reload");
+            Err(SaveError::Conflict(kind)) => {
+                self.set_status(format!("Not saved. {} Choose Overwrite or Reload.", kind.describe()));
                 false
             }
             Err(SaveError::Io(e)) => {
@@ -831,7 +831,7 @@ impl FileCraftApp {
         });
 
         if editing {
-            let (dirty, conflict) = self.preview.as_ref().map_or((false, false), |p| (p.dirty, p.conflict));
+            let (dirty, conflict) = self.preview.as_ref().map_or((false, None), |p| (p.dirty, p.conflict));
             ui.horizontal(|ui| {
                 if ui.add_enabled(dirty, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
                     save = true;
@@ -849,9 +849,9 @@ impl FileCraftApp {
                     format!("This file mixes CRLF and LF line endings. Saving uses {style} for every line."),
                 );
             }
-            if conflict {
+            if let Some(kind) = conflict {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, "This file changed or was deleted on disk since you opened it.");
+                    ui.colored_label(ui.visuals().error_fg_color, kind.describe());
                     if ui.button("Overwrite").clicked() {
                         force_save = true;
                     }
