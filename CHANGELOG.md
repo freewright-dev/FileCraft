@@ -88,6 +88,12 @@ All notable changes to this project are documented here. The format follows
 - Extreme file times, which any user can set, and folder sizes that add up past the maximum no
   longer overflow. Debug builds panicked on the UI thread when such a row was shown; release
   builds could show a wrong date or a folder size of zero (FC-19).
+- Deep folder trees index in linear time. Building the full paths for the path sort and summing
+  folder sizes both cost time and memory proportional to the depth of every entry. A 32,000-level
+  chain took about 4 s and 1.3 GB in release builds; it is now a few milliseconds. The path sort
+  now orders folders by their names from the root, compared name by name. This is the same as
+  sorting the full path text except where one sibling's name is a prefix of another's (`a` and
+  `a b`), where folders sort by their own chain (FC-12).
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

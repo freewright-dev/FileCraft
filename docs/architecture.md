@@ -23,7 +23,10 @@ full paths are rebuilt on demand by walking parent ids, so no path strings are s
 Four sort orders (`by_name`, `by_path`, `by_size`, `by_date`) are precomputed with a parallel
 merge sort when the index is built. Searching walks the order for the requested column and keeps
 matching ids, so results come out already sorted and no per-query sort is needed. The path order
-sorts by (rank of the parent folder's full path, name).
+sorts by (rank of the parent folder, name). Folder ranks follow the chain of names from the root,
+compared name by name (a folder before its subfolders). They are computed without building paths,
+so the cost stays linear in depth; this matches full-path text order except where one sibling's
+name is a prefix of another's (`a` and `a b`).
 
 Folder sizes are the sum of all files below them, propagated up the parent chain after building.
 

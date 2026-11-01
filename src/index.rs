@@ -302,7 +302,7 @@ impl VolumeBuilder {
                 v
             });
             let path = s.spawn(|| {
-                let rank = directory_ranks(entries, self.letter, &lower_of);
+                let rank = directory_ranks(entries, &lower_of);
                 let mut v = ids.clone();
                 par_sort_by(&mut v, |&a, &b| {
                     let pa = rank[entries[a as usize].parent as usize];
@@ -369,48 +369,103 @@ fn truncate_name(name: &str) -> &str {
 
 /// Replaces directory sizes with the total size of the files below them.
 fn compute_folder_sizes(entries: &mut [Entry]) {
-    for e in entries.iter_mut().filter(|e| e.is_dir()) {
-        e.size = 0;
+    let n = entries.len();
+    // Each folder starts with the sizes of the files directly inside it.
+    let mut total = vec![0u64; n];
+    for e in entries.iter().filter(|e| !e.is_dir() && e.parent != NONE) {
+        let p = e.parent as usize;
+        total[p] = total[p].saturating_add(e.size);
     }
-    for i in 0..entries.len() {
-        let e = entries[i];
-        if e.is_dir() || e.size == 0 || e.parent == NONE {
-            continue;
+
+    // Link every folder to its children, then list the folders in pre-order from the roots.
+    // A folder's descendants always come after it, so walking the list backwards adds each
+    // folder's finished total into its parent once: linear time, however deep the tree.
+    let mut head = vec![NONE; n];
+    let mut next = vec![NONE; n];
+    for (d, e) in entries.iter().enumerate() {
+        if e.is_dir() && e.parent != NONE {
+            next[d] = head[e.parent as usize];
+            head[e.parent as usize] = d as u32;
         }
-        // Every ancestor, however deep; the count bound only stops corrupt (looping) links.
-        let mut p = e.parent;
-        for _ in 0..entries.len() {
-            if p == NONE {
-                break;
-            }
-            let parent = &mut entries[p as usize];
-            parent.size = parent.size.saturating_add(e.size);
-            p = parent.parent;
+    }
+    let mut order = Vec::with_capacity(n);
+    let mut stack: Vec<u32> = (0..n as u32)
+        .filter(|&i| entries[i as usize].is_dir() && entries[i as usize].parent == NONE)
+        .collect();
+    while let Some(d) = stack.pop() {
+        order.push(d);
+        let mut c = head[d as usize];
+        while c != NONE {
+            stack.push(c);
+            c = next[c as usize];
+        }
+    }
+    for &d in order.iter().rev() {
+        let p = entries[d as usize].parent;
+        if p != NONE {
+            total[p as usize] = total[p as usize].saturating_add(total[d as usize]);
+        }
+    }
+    for (e, t) in entries.iter_mut().zip(total) {
+        if e.is_dir() {
+            e.size = t;
         }
     }
 }
 
 /// Rank of every directory in full-path order (only directory slots are meaningful).
-fn directory_ranks<'a>(entries: &[Entry], letter: char, lower_of: &(impl Fn(u32) -> &'a str + Sync)) -> Vec<u32> {
-    let mut dirs: Vec<(String, u32)> = Vec::new();
-    for (i, e) in entries.iter().enumerate() {
-        if !e.is_dir() || (i != 0 && e.parent == NONE) {
+///
+/// Folders are ordered by their chain of names from the root, compared name by name (a folder
+/// before its subfolders, siblings by name). This is computed by a pre-order walk, so no paths are
+/// built and the cost is O(n log n) however deep the tree (FC-12). It differs from sorting the
+/// full path text only where one sibling's name is a prefix of another's (`a` and `a b`), where
+/// the text order would interleave a folder's subfolders with its sibling's contents.
+/// Folders not reachable from the root (only possible in corrupt data) are numbered last.
+fn directory_ranks<'a>(entries: &[Entry], lower_of: &(impl Fn(u32) -> &'a str + Sync)) -> Vec<u32> {
+    let n = entries.len();
+    let mut kids: Vec<u32> = (0..n as u32)
+        .filter(|&i| entries[i as usize].is_dir() && entries[i as usize].parent != NONE)
+        .collect();
+    kids.sort_unstable_by(|&a, &b| {
+        entries[a as usize]
+            .parent
+            .cmp(&entries[b as usize].parent)
+            .then_with(|| lower_of(a).cmp(lower_of(b)))
+            .then(a.cmp(&b))
+    });
+    // The children of folder `p` are `kids[first[p]..first[p] + count[p]]`.
+    let mut first = vec![0u32; n];
+    let mut count = vec![0u32; n];
+    for (pos, &d) in kids.iter().enumerate() {
+        let p = entries[d as usize].parent as usize;
+        if count[p] == 0 {
+            first[p] = pos as u32;
+        }
+        count[p] += 1;
+    }
+
+    let mut rank = vec![0u32; n];
+    let mut seen = vec![false; n];
+    let mut next_rank = 0u32;
+    let mut stack = vec![0u32];
+    while let Some(d) = stack.pop() {
+        let di = d as usize;
+        if seen[di] {
             continue;
         }
-        let chain: Vec<u32> = ancestors(entries, i as u32).collect();
-        let mut path = String::with_capacity(64);
-        path.push(letter.to_ascii_lowercase());
-        path.push(':');
-        for &id in chain.iter().rev() {
-            path.push('\\');
-            path.push_str(lower_of(id));
+        seen[di] = true;
+        rank[di] = next_rank;
+        next_rank += 1;
+        let start = first[di] as usize;
+        for &k in kids[start..start + count[di] as usize].iter().rev() {
+            stack.push(k);
         }
-        dirs.push((path, i as u32));
     }
-    dirs.sort_unstable();
-    let mut rank = vec![0u32; entries.len()];
-    for (r, (_, idx)) in dirs.iter().enumerate() {
-        rank[*idx as usize] = r as u32;
+    for i in 0..n {
+        if !seen[i] && entries[i].is_dir() {
+            rank[i] = next_rank;
+            next_rank += 1;
+        }
     }
     rank
 }
@@ -851,6 +906,55 @@ pub mod tests {
         let v = b.finish(Source::Walk, Duration::ZERO);
         let huge = v.by_name.iter().copied().find(|&i| v.name(i) == "huge").unwrap();
         assert_eq!(v.entry(huge).size, u64::MAX);
+    }
+
+    /// FC-12: folder sizes and path ranks used to cost O(depth) per entry (quadratic on a deep
+    /// chain). A 20,000-level chain must now build quickly and still get its sizes right.
+    #[test]
+    fn deep_chain_builds_in_linear_time() {
+        const DEPTH: u32 = 20_000;
+        let mut b = VolumeBuilder::new('C');
+        let mut parent = 0;
+        for _ in 0..DEPTH {
+            parent = b.push("d", parent, ATTR_DIRECTORY, 0, 0);
+        }
+        let deepest = parent;
+        b.push("f.bin", deepest, 0, 7, 0);
+        let start = std::time::Instant::now();
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(20), "finish() took {took:?} for {DEPTH} levels");
+        assert_eq!(v.entry(0).size, 7);
+        assert_eq!(v.entry(deepest).size, 7);
+        assert_eq!(v.len() as u32, DEPTH + 1);
+    }
+
+    /// FC-12: the path sort orders entries by their parent folder's chain of names (compared name
+    /// by name), then by name. Checked against a direct sort of those chains, on siblings whose
+    /// names are prefixes of each other (`a`, `a b`, `ab`) and on names below the separator.
+    #[test]
+    fn path_order_is_the_order_of_name_chains() {
+        let mut b = VolumeBuilder::new('C');
+        for name in ["a", "a b", "a-b", "ab", "a0", "b", "Ac"] {
+            let d = b.push(name, 0, ATTR_DIRECTORY, 0, 0);
+            let sub = b.push("z", d, ATTR_DIRECTORY, 0, 0);
+            b.push("f1", sub, 0, 1, 0);
+            b.push("f2", d, 0, 1, 0);
+        }
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        let parent_chain = |i: u32| -> Vec<String> {
+            let mut chain = Vec::new();
+            let mut cur = v.entry(i).parent;
+            while cur != 0 && cur != NONE {
+                chain.push(v.name(cur).to_lowercase());
+                cur = v.entry(cur).parent;
+            }
+            chain.reverse();
+            chain
+        };
+        let mut expected = v.by_path.clone();
+        expected.sort_by_key(|&i| (parent_chain(i), v.name(i).to_lowercase(), i));
+        assert_eq!(v.by_path, expected);
     }
 
     #[test]
