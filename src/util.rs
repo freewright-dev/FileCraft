@@ -134,9 +134,56 @@ pub fn group_digits(n: usize) -> String {
     out
 }
 
+/// The path to use for file-system calls on an indexed item. Index paths are plain (`X:\a\b`),
+/// and Win32 normalises plain paths: it strips trailing dots and spaces from components, so
+/// `X:\report.txt.` would open `X:\report.txt`. The verbatim form (`\\?\X:\…`) reaches the
+/// named item itself (FC-15). Paths that are not drive-absolute are returned unchanged.
+pub fn fs_path(full: &str) -> std::path::PathBuf {
+    let b = full.as_bytes();
+    if cfg!(windows) && b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        format!(r"\\?\{full}").into()
+    } else {
+        full.into()
+    }
+}
+
+/// Whether Win32 would resolve the plain path `full` to a different item: a component ends in a
+/// dot or a space, or is a reserved device name (`CON`, `NUL`, `COM1`, `LPT1.txt` …). The shell
+/// and other programs only accept plain paths, so such items cannot be handed to them safely.
+pub fn win32_alias(full: &str) -> bool {
+    const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    let rest = full.get(3..).filter(|_| full.as_bytes().get(1) == Some(&b':')).unwrap_or(full);
+    rest.split('\\').filter(|c| !c.is_empty()).any(|c| {
+        if c.ends_with(['.', ' ']) {
+            return true;
+        }
+        let stem = c.split('.').next().unwrap_or(c).trim_end_matches(' ');
+        let upper = stem.to_ascii_uppercase();
+        DEVICES.contains(&upper.as_str())
+            || (upper.len() == 4
+                && (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && upper.as_bytes()[3].is_ascii_digit()
+                && upper.as_bytes()[3] != b'0')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FC-15: names Win32 would rewrite are detected, and file-system calls use verbatim paths.
+    #[test]
+    fn detects_paths_win32_would_rewrite() {
+        for alias in [r"C:\x\report.txt.", r"C:\x\space.txt ", r"C:\sub.\f.txt", r"C:\x\CON", r"C:\x\nul.txt", r"C:\x\com1"] {
+            assert!(win32_alias(alias), "{alias}");
+        }
+        for plain in [r"C:\", r"C:\x\report.txt", r"C:\.git\config", r"C:\x\console.txt", r"C:\x\COM0", r"C:\x\a b\c"] {
+            assert!(!win32_alias(plain), "{plain}");
+        }
+        #[cfg(windows)]
+        assert_eq!(fs_path(r"C:\x\report.txt."), std::path::PathBuf::from(r"\\?\C:\x\report.txt."));
+        assert_eq!(fs_path("relative"), std::path::PathBuf::from("relative"));
+    }
 
     /// FC-19: a timestamp near `i64::MAX` (settable by any user) panicked in debug builds when a
     /// positive offset was added to it. Formatting must saturate instead.

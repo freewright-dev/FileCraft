@@ -193,6 +193,34 @@ mod tests {
         assert_eq!(v.entry(a).size, 17);
     }
 
+    /// FC-15: from a verbatim root, a folder named `sub.` is listed itself. With a plain root its
+    /// path became `sub`, so its contents were skipped or replaced by those of a `sub` twin.
+    #[cfg(windows)]
+    #[test]
+    fn trailing_dot_folders_are_walked_themselves() {
+        let plain = std::env::temp_dir().join(format!("filecraft-walk-dots-{}", std::process::id()));
+        let root = crate::util::fs_path(&plain.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub.")).unwrap();
+        std::fs::create_dir_all(root.join("sub2")).unwrap();
+        std::fs::create_dir_all(root.join("sub2.")).unwrap();
+        std::fs::write(root.join("sub.").join("inner.txt"), "x").unwrap();
+        std::fs::write(root.join("sub2").join("decoy.txt"), "x").unwrap();
+        std::fs::write(root.join("sub2.").join("real.txt"), "x").unwrap();
+
+        let skipped = AtomicUsize::new(0);
+        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicBool::new(false)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+
+        let path_of = |name: &str| -> Vec<String> {
+            v.by_name.iter().copied().filter(|&i| v.name(i) == name).map(|i| v.full_path(i)).collect()
+        };
+        assert_eq!(skipped.load(Ordering::Relaxed), 0);
+        assert_eq!(path_of("inner.txt"), [r"T:\sub.\inner.txt"]);
+        assert_eq!(path_of("real.txt"), [r"T:\sub2.\real.txt"]);
+        assert_eq!(path_of("decoy.txt"), [r"T:\sub2\decoy.txt"]);
+    }
+
     /// Runs `read_one_dir` alone and returns the batches it sent.
     fn read_alone(dir: &Path, skipped: &AtomicUsize, cancel: &AtomicBool) -> Vec<Vec<Raw>> {
         let shared = Shared { next_id: AtomicU32::new(1), pending: AtomicUsize::new(1), skipped, cancel };

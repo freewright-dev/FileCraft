@@ -652,6 +652,29 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// FC-15: with the verbatim path the app now passes, `report.txt.` is previewed and saved
+    /// itself. With a plain path Win32 stripped the dot, and both acted on `report.txt`.
+    #[cfg(windows)]
+    #[test]
+    fn trailing_dot_names_are_previewed_and_saved_themselves() {
+        let dir = std::env::temp_dir().join(format!("filecraft-preview-dots-{}", std::process::id()));
+        let vdir = crate::util::fs_path(&dir.to_string_lossy());
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(vdir.join("report.txt"), "OTHER").unwrap();
+        fs::write(vdir.join("report.txt."), "HIDDEN").unwrap();
+
+        let path = crate::util::fs_path(&format!(r"{}\report.txt.", dir.display()));
+        let mut p = Preview::load(&path, false);
+        assert!(matches!(&p.content, Content::Text { text, .. } if text == "HIDDEN"));
+        p.begin_edit().unwrap();
+        p.buffer.push('!');
+        p.dirty = true;
+        assert!(p.save(false).is_ok());
+        assert_eq!(fs::read(vdir.join("report.txt.")).unwrap(), b"HIDDEN!");
+        assert_eq!(fs::read(vdir.join("report.txt")).unwrap(), b"OTHER");
+        fs::remove_dir_all(&vdir).unwrap();
+    }
+
     /// FC-13: saving must never read a file past the edit limit, even when it grew after editing
     /// began; it refuses instead of reading and backing up the whole file on the UI thread.
     #[test]

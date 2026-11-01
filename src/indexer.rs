@@ -5,7 +5,6 @@ use crate::index::{Source, VolumeIndex, cache_path};
 use crate::{mft, walk};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -223,7 +222,9 @@ impl Job {
                     s.phase = Phase::Indexing(Source::Walk);
                 }
             });
-            let root = PathBuf::from(format!("{letter}:\\"));
+            // Verbatim, so folders named `x.` or `x ` are listed themselves rather than their
+            // `x` twin (or nothing): Win32 strips trailing dots and spaces from plain paths (FC-15).
+            let root = crate::util::fs_path(&format!("{letter}:\\"));
             result = walk::walk_volume(letter, &root, &self.progress, &skipped, &self.cancel);
         }
 

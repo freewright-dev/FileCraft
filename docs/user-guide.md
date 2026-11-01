@@ -104,6 +104,11 @@ Right-click a result, use the preview pane buttons, or the keyboard:
 | `F2` | Toggle the preview pane |
 | `F5` | Re-index all drives |
 
+Windows rewrites some names when a program opens them: a trailing dot or space is dropped, and
+`CON`, `NUL`, `COM1` and similar are devices. FileCraft previews and edits such items themselves.
+It refuses to open them, show them in Explorer, show their properties or pass them to the
+external editor, since those would act on a different item.
+
 ## Settings
 
 **File → Settings…**

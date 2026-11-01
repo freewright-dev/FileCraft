@@ -97,6 +97,11 @@ All notable changes to this project are documented here. The format follows
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
+- Items whose names end in a dot or a space are previewed, edited and saved themselves. Before,
+  Win32 path normalisation sent these actions to a sibling (`report.txt.` opened `report.txt`), and
+  the folder scan listed a `sub.` folder's twin `sub` or nothing. File-system calls and the folder
+  scan now use verbatim `\\?\` paths. Open, Show in folder, Properties and External editor take
+  only plain paths, so they are refused for such names and for device names such as `CON` (FC-15).
 - On a volume whose `$MFT` is fragmented enough that its run list continues in an
   `$ATTRIBUTE_LIST`, the NTFS reader no longer indexes only the records the first runs cover
   while reporting the drive as ready. It checks that the runs cover the whole table and start at

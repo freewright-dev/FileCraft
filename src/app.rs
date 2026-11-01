@@ -5,7 +5,7 @@ use crate::index::{ATTR_HIDDEN, ATTR_SYSTEM, Index, SortKey, Source, data_dir};
 use crate::indexer::{Drive, IndexEvent, Indexer, Phase, fixed_drives};
 use crate::preview::{Content, Preview, PreviewLoader, SaveError};
 use crate::search::{Hit, SearchOptions, Searcher, Sort};
-use crate::util::{format_filetime, format_size, group_digits, local_offset};
+use crate::util::{format_filetime, format_size, fs_path, group_digits, local_offset, win32_alias};
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::collections::BTreeSet;
@@ -263,7 +263,7 @@ impl FileCraftApp {
         }
         let Some(hit) = self.selected else { return };
         let v = self.shown.volume(hit.vol);
-        let path = PathBuf::from(v.full_path(hit.idx));
+        let path = fs_path(&v.full_path(hit.idx));
         if self.preview.as_ref().is_some_and(|p| p.path == path || p.dirty)
             || self.preview_request.as_ref() == Some(&path)
         {
@@ -297,15 +297,25 @@ impl FileCraftApp {
     fn run_action(&mut self, action: RowAction, ctx: &egui::Context) {
         let Some(hit) = self.selected else { return };
         let v = self.shown.volume(hit.vol);
-        let path = PathBuf::from(v.full_path(hit.idx));
+        let full = v.full_path(hit.idx);
+        // File-system calls (preview, edit) use the verbatim path; the shell and external programs
+        // only take plain paths, so items Win32 would resolve to another file are refused (FC-15).
+        let path = fs_path(&full);
+        let shell_path = if win32_alias(&full) {
+            Err(std::io::Error::other(
+                "the name ends in a dot or space or is a device name, so Windows would open a different item",
+            ))
+        } else {
+            Ok(PathBuf::from(&full))
+        };
         let name = v.name(hit.idx).to_string();
         let result = match action {
-            RowAction::Open => actions::open(&path),
-            RowAction::Reveal => actions::reveal(&path),
-            RowAction::Properties => actions::properties(&path),
-            RowAction::EditExternal => actions::edit_externally(&self.editor, &path),
+            RowAction::Open => shell_path.and_then(|p| actions::open(&p)),
+            RowAction::Reveal => shell_path.and_then(|p| actions::reveal(&p)),
+            RowAction::Properties => shell_path.and_then(|p| actions::properties(&p)),
+            RowAction::EditExternal => shell_path.and_then(|p| actions::edit_externally(&self.editor, &p)),
             RowAction::CopyPath => {
-                ctx.copy_text(path.display().to_string());
+                ctx.copy_text(full.clone());
                 self.set_status("Copied full path");
                 Ok(())
             }
@@ -873,7 +883,7 @@ impl FileCraftApp {
             p.cancel_edit();
         }
         if reload {
-            self.request_preview(PathBuf::from(&path), e.is_dir());
+            self.request_preview(fs_path(&path), e.is_dir());
         }
         if let Some(a) = action {
             self.run_action(a, ctx);

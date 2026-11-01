@@ -11,7 +11,7 @@
 | `src/search.rs` | Query language, parallel filtering, cross-drive merge, background searcher |
 | `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts) |
 | `src/actions.rs` | Shell integration: open, reveal, properties, external editor, elevation |
-| `src/util.rs` | FILETIME and size formatting, local-time helpers |
+| `src/util.rs` | FILETIME and size formatting, local-time helpers, verbatim file-system paths (`fs_path`) and detection of names Win32 would rewrite (`win32_alias`) |
 
 ## Index layout
 
@@ -48,7 +48,9 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
     `$ATTRIBUTE_LIST`, which is not read).
 
   Records shorter than the fixed header are skipped.
-- **Walk** (`walk.rs`) — worker threads pull directories from a shared queue. Every entry gets its
+- **Walk** (`walk.rs`) — starts from the verbatim root `\\?\X:\`, so folders whose names end in a
+  dot or a space are listed themselves (Win32 strips those characters from plain paths). Worker
+  threads pull directories from a shared queue. Every entry gets its
   final id from an atomic counter, so subdirectories are queued with their id and a single
   collector thread fills the table without any path lookups. Junctions and symlinks are listed but
   not followed. On Windows the metadata comes from the directory listing itself. Entries reach
