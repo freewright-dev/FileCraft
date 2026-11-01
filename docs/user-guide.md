@@ -58,7 +58,10 @@ Terms separated by spaces must all match. Matching is case-insensitive unless **
 | `regex:^IMG_\d+\.jpg$` | regular expression on the name |
 | `path:foo` | match this term against the full path |
 
-Prefixes combine with everything else: `report ext:pdf dm:7d !draft`.
+Prefixes combine with everything else: `report ext:pdf dm:7d !draft`. They also apply to a
+quoted phrase written right after them: `!"old copy"` excludes names containing `old copy`, and
+`folder:"my docs"` finds folders containing `my docs`. Inside the quotes everything is literal
+text, so `"!draft"` searches for `!draft`.
 
 ## Reading and editing files
 

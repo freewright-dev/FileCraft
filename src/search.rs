@@ -114,31 +114,42 @@ impl Query {
             return Ok(Query { clauses, case });
         }
 
-        for (token, quoted) in tokenize(text) {
-            let (negate, body) = match token.strip_prefix('!') {
-                Some(rest) if !quoted => (true, rest.to_string()),
+        for (token, quote_at) in tokenize(text) {
+            // Only the part before the first quote can hold `!` and prefixes; quoted text is
+            // literal. So `!"a b"` and `folder:"my docs"` work, and `"!a"` is just text.
+            let mut head = quote_at.unwrap_or(token.len());
+            let (negate, mut body) = match token.strip_prefix('!') {
+                Some(rest) if head > 0 => {
+                    head -= 1;
+                    (true, rest.to_string())
+                }
                 _ => (false, token),
             };
             if body.is_empty() {
                 continue;
             }
             // `folder:src` = folders whose name contains `src` (the type test is ANDed).
-            let mut body = body;
-            if !quoted && let Some((prefix, value)) = body.split_once(':') {
-                let type_test = match prefix.to_ascii_lowercase().as_str() {
+            if let Some(colon) = body[..head].find(':') {
+                let type_test = match body[..colon].to_ascii_lowercase().as_str() {
                     "file" | "files" => Some(Test::File),
                     "folder" | "folders" | "dir" => Some(Test::Folder),
                     _ => None,
                 };
                 if let Some(t) = type_test {
+                    let value = body[colon + 1..].to_string();
                     clauses.push(Clause { alts: vec![t], negate: negate && value.is_empty() });
                     if value.is_empty() {
                         continue;
                     }
-                    body = value.to_string();
+                    body = value;
+                    head -= colon + 1;
                 }
             }
-            let alts = if quoted {
+            let quoted = quote_at.is_some();
+            let function_prefix = body[..head]
+                .split_once(':')
+                .is_some_and(|(p, _)| FUNCTION_PREFIXES.contains(&p.to_ascii_lowercase().as_str()));
+            let alts = if quoted && !function_prefix {
                 vec![text_test(&body, opts.match_path, case)]
             } else {
                 parse_term(&body, opts, case)?
@@ -159,29 +170,33 @@ fn short_error(msg: &str) -> String {
     msg.lines().rfind(|l| !l.trim().is_empty()).unwrap_or(msg).trim().to_string()
 }
 
-/// Splits on whitespace, keeping `"quoted parts"` together. Returns `(token, was_quoted)`.
-fn tokenize(text: &str) -> Vec<(String, bool)> {
+/// Prefixes [`parse_term`] handles; they keep their meaning in front of a quoted value.
+const FUNCTION_PREFIXES: [&str; 7] = ["ext", "size", "dm", "datemodified", "modified", "regex", "path"];
+
+/// Splits on whitespace, keeping `"quoted parts"` together. Returns each token without its quotes
+/// and, if it had any, the byte offset in the token where the first quoted part starts.
+fn tokenize(text: &str) -> Vec<(String, Option<usize>)> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
-    let mut quoted = false;
+    let mut quote_at = None;
     let mut in_quotes = false;
     for c in text.chars() {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
-                quoted = true;
+                quote_at.get_or_insert(cur.len());
             }
             c if c.is_whitespace() && !in_quotes => {
                 if !cur.is_empty() {
-                    tokens.push((std::mem::take(&mut cur), quoted));
+                    tokens.push((std::mem::take(&mut cur), quote_at));
                 }
-                quoted = false;
+                quote_at = None;
             }
             c => cur.push(c),
         }
     }
     if !cur.is_empty() {
-        tokens.push((cur, quoted));
+        tokens.push((cur, quote_at));
     }
     tokens
 }
@@ -720,6 +735,24 @@ mod tests {
         assert_eq!(names("!s"), ["big.bin", "readme.md"]);
         assert_eq!(names("main|big"), ["big.bin", "main.rs"]);
         assert_eq!(names("\"me.m\""), ["readme.md"]);
+    }
+
+    /// MIN-04: `!` and the `file:`/`folder:`/`ext:`/`path:`… prefixes apply to a quoted phrase
+    /// written after them. They used to be searched for as text (`!"me.m"` looked for `!me.m`).
+    /// Inside the quotes everything stays literal.
+    #[test]
+    fn prefixes_apply_to_quoted_phrases() {
+        assert_eq!(names("!\"me.m\""), ["big.bin", "docs", "main.rs", "Notes.TXT", "src"]);
+        assert_eq!(names("folder:\"oc\""), ["docs"]);
+        assert_eq!(names("file:\"m\""), ["main.rs", "readme.md"]);
+        assert_eq!(names("!folder:\"o\""), names("!folder:o"));
+        assert_eq!(names("!\"m\" file:"), names("!m file:"));
+        assert_eq!(names("ext:\"md\""), ["readme.md"]);
+        assert_eq!(names("path:\"docs\\\""), ["Notes.TXT", "readme.md"]);
+        // Quoted, the same characters are text: no negation, no prefix, no wildcard.
+        assert_eq!(names("\"!me\""), Vec::<String>::new());
+        assert_eq!(names("\"folder:oc\""), Vec::<String>::new());
+        assert_eq!(names("\"*.rs\""), Vec::<String>::new());
     }
 
     #[test]
