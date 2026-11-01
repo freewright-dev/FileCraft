@@ -16,6 +16,7 @@ const RECORD_HEADER_LEN: usize = 0x30;
 const MAX_MFT_RECORDS: u64 = 64 << 20;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
+const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_END: u32 = 0xFFFF_FFFF;
@@ -82,16 +83,20 @@ pub fn read_volume(
     if !apply_fixup(&mut rec0) {
         anyhow::bail!("corrupt $MFT record");
     }
-    let runs = mft_runs(&rec0, total_clusters).ok_or_else(|| anyhow::anyhow!("cannot locate valid $MFT data runs"))?;
+    let mut read_raw = |offset: u64, buf: &mut [u8]| {
+        offset.checked_add(buf.len() as u64).is_some_and(|end| end <= volume_bytes) && read_exact_at(&volume, buf, offset).is_ok()
+    };
+    let runs = mft_data_runs(&rec0, total_clusters, cluster, record_size, &mut read_raw)
+        .map_err(|e| anyhow::anyhow!("cannot locate valid $MFT data runs: {e}"))?;
 
     let record_count = mft_bytes / record_size as u64;
     if record_count > MAX_MFT_RECORDS {
         anyhow::bail!("$MFT has more than {MAX_MFT_RECORDS} records");
     }
-    // A run list continued through $ATTRIBUTE_LIST is not read: fail closed so the folder scan
-    // runs instead of an index that silently misses part of the volume (FC-14).
+    // Fail closed when the runs cannot hold the whole table, so the folder scan runs instead of
+    // an index that silently misses part of the volume (FC-14).
     if !runs_cover_records(&runs, cluster, record_size as u64, record_count) {
-        anyhow::bail!("$MFT data runs in record 0 do not cover the whole table ($ATTRIBUTE_LIST is not supported)");
+        anyhow::bail!("$MFT data runs do not cover the whole table");
     }
     let record_count = record_count as usize;
     total.store(record_count, Ordering::Relaxed);
@@ -337,14 +342,146 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
     }
 }
 
-/// Decodes the data runs of the unnamed $DATA attribute in $MFT's own record:
-/// `(starting LCN or None when sparse, length in clusters)`. Fails on an empty run, a negative or
-/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters`. Also fails
-/// when the attribute does not start at VCN 0: that is an extension piece of a run list kept in
-/// an `$ATTRIBUTE_LIST`, which is not supported (FC-14).
-fn mft_runs(rec0: &[u8], total_clusters: u64) -> Option<Vec<(Option<u64>, u64)>> {
-    let (_, attr) = attributes(rec0).find(|(ty, a)| *ty == ATTR_DATA && a[8] != 0 && a[9] == 0)?;
-    if attr.len() < 0x22 || u64_at(attr, 0x10) != 0 {
+/// `(starting LCN or None when sparse, length in clusters)`, in VCN order.
+type Runs = Vec<(Option<u64>, u64)>;
+
+/// Decodes the data runs of the unnamed $DATA attribute in $MFT's own record that starts at
+/// VCN 0. When $MFT is fragmented, that is only the first piece of its run list; see
+/// [`mft_data_runs`] for the rest.
+fn mft_runs(rec0: &[u8], total_clusters: u64) -> Option<Runs> {
+    data_piece(rec0, 0).and_then(|attr| decode_runs(attr, total_clusters))
+}
+
+/// The unnamed, non-resident $DATA attribute in `record` whose run list starts at `vcn`.
+fn data_piece(record: &[u8], vcn: u64) -> Option<&[u8]> {
+    attributes(record)
+        .map(|(_, a)| a)
+        .find(|a| u32_at(a, 0) == ATTR_DATA && a[8] != 0 && a[9] == 0 && a.len() >= 0x22 && u64_at(a, 0x10) == vcn)
+}
+
+/// The whole run list of $MFT (FC-14). Without an `$ATTRIBUTE_LIST` in record 0 this is the
+/// piece record 0 holds. With one, the list names every piece of the unnamed $DATA attribute,
+/// by starting VCN and the record holding it; those records are read through `read` (raw volume
+/// bytes at an offset), located with the runs decoded so far. The pieces must follow each other
+/// without gaps or overlaps; anything else fails, and the caller falls back to the folder scan.
+fn mft_data_runs(
+    rec0: &[u8],
+    total_clusters: u64,
+    cluster: u64,
+    record_size: usize,
+    read: &mut dyn FnMut(u64, &mut [u8]) -> bool,
+) -> Result<Runs, String> {
+    let Some(pieces) = attribute_list_data_pieces(rec0, cluster, total_clusters, read)? else {
+        return mft_runs(rec0, total_clusters).ok_or_else(|| "invalid $MFT data runs".to_string());
+    };
+    let mut runs: Runs = Vec::new();
+    let mut next_vcn = 0u64;
+    for (vcn, frn) in pieces {
+        if vcn != next_vcn {
+            return Err(format!("$MFT run list has a gap or overlap at VCN {vcn}"));
+        }
+        let piece_runs = if frn == 0 {
+            data_piece(rec0, vcn).and_then(|a| decode_runs(a, total_clusters))
+        } else {
+            let mut record = vec![0u8; record_size];
+            let offset = frn
+                .checked_mul(record_size as u64)
+                .and_then(|byte| volume_offset(&runs, cluster, byte))
+                .ok_or_else(|| format!("$MFT extension record {frn} lies outside the runs read so far"))?;
+            if !read(offset, &mut record) || !apply_fixup(&mut record) {
+                return Err(format!("cannot read $MFT extension record {frn}"));
+            }
+            data_piece(&record, vcn).and_then(|a| decode_runs(a, total_clusters))
+        };
+        let piece_runs = piece_runs.ok_or_else(|| format!("invalid $MFT data runs at VCN {vcn}"))?;
+        for &(_, clusters) in &piece_runs {
+            next_vcn = next_vcn.checked_add(clusters).ok_or("$MFT run list overflows")?;
+        }
+        runs.extend(piece_runs);
+    }
+    if runs.is_empty() {
+        return Err("$MFT has no data runs".into());
+    }
+    Ok(runs)
+}
+
+/// `(starting VCN, record number)` of every piece of $MFT's unnamed $DATA attribute, sorted by
+/// VCN, when record 0 has an `$ATTRIBUTE_LIST`; `None` when it has none. A non-resident list is
+/// read from the volume through `read`.
+fn attribute_list_data_pieces(
+    rec0: &[u8],
+    cluster: u64,
+    total_clusters: u64,
+    read: &mut dyn FnMut(u64, &mut [u8]) -> bool,
+) -> Result<Option<Vec<(u64, u64)>>, String> {
+    let Some((_, list_attr)) = attributes(rec0).find(|(ty, _)| *ty == ATTR_ATTRIBUTE_LIST) else { return Ok(None) };
+    let owned;
+    let list: &[u8] = if list_attr[8] == 0 {
+        resident_value(list_attr).ok_or("invalid $ATTRIBUTE_LIST")?
+    } else {
+        if list_attr.len() < 0x38 {
+            return Err("invalid $ATTRIBUTE_LIST".into());
+        }
+        let size = usize::try_from(u64_at(list_attr, 0x30)).ok().filter(|&s| s <= 16 << 20).ok_or("invalid $ATTRIBUTE_LIST size")?;
+        let runs = decode_runs(list_attr, total_clusters).ok_or("invalid $ATTRIBUTE_LIST runs")?;
+        let mut bytes = Vec::with_capacity(size);
+        for (lcn, clusters) in runs {
+            let len = usize::try_from(clusters * cluster).map_err(|_| "invalid $ATTRIBUTE_LIST runs")?;
+            let mut chunk = vec![0u8; len];
+            match lcn {
+                Some(lcn) if read(lcn * cluster, &mut chunk) => {}
+                Some(_) => return Err("cannot read $ATTRIBUTE_LIST".into()),
+                None => {}
+            }
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() >= size {
+                break;
+            }
+        }
+        if bytes.len() < size {
+            return Err("$ATTRIBUTE_LIST runs are shorter than the list".into());
+        }
+        bytes.truncate(size);
+        owned = bytes;
+        &owned
+    };
+
+    let mut pieces = Vec::new();
+    let mut pos = 0;
+    while pos + 0x1A <= list.len() {
+        let entry_len = u16_at(list, pos + 4) as usize;
+        if entry_len < 0x1A || pos + entry_len > list.len() {
+            return Err("invalid $ATTRIBUTE_LIST entry".into());
+        }
+        let entry = &list[pos..pos + entry_len];
+        if u32_at(entry, 0) == ATTR_DATA && entry[6] == 0 {
+            pieces.push((u64_at(entry, 8), u64_at(entry, 0x10) & REF_MASK));
+        }
+        pos += entry_len;
+    }
+    pieces.sort_unstable();
+    if pieces.first().is_none_or(|&(vcn, _)| vcn != 0) {
+        return Err("$ATTRIBUTE_LIST lists no $DATA piece at VCN 0".into());
+    }
+    Ok(Some(pieces))
+}
+
+/// The volume byte offset of byte `byte` of $MFT, if `runs` cover it (not in a sparse run).
+fn volume_offset(runs: &[(Option<u64>, u64)], cluster: u64, byte: u64) -> Option<u64> {
+    let mut vcn = byte / cluster;
+    for &(lcn, clusters) in runs {
+        if vcn < clusters {
+            return lcn?.checked_add(vcn)?.checked_mul(cluster)?.checked_add(byte % cluster);
+        }
+        vcn -= clusters;
+    }
+    None
+}
+
+/// Decodes the mapping pairs of a non-resident attribute. Fails on an empty run, a negative or
+/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters` (FC-10).
+fn decode_runs(attr: &[u8], total_clusters: u64) -> Option<Runs> {
+    if attr.len() < 0x22 {
         return None;
     }
     let mut pos = u16_at(attr, 0x20) as usize;
@@ -597,6 +734,71 @@ mod tests {
         let mut rec = record(RECORD_IN_USE, 0, &[attr]);
         assert!(apply_fixup(&mut rec));
         assert_eq!(mft_runs(&rec, 0x2000), None);
+    }
+
+    /// An `$ATTRIBUTE_LIST` naming the pieces `(starting VCN, record)` of the unnamed $DATA.
+    fn attribute_list(pieces: &[(u64, u64)]) -> Vec<u8> {
+        let mut list = Vec::new();
+        for &(vcn, frn) in pieces {
+            let mut e = vec![0u8; 0x20];
+            e[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+            e[4..6].copy_from_slice(&0x20u16.to_le_bytes());
+            e[7] = 0x1A;
+            e[8..16].copy_from_slice(&vcn.to_le_bytes());
+            e[0x10..0x18].copy_from_slice(&(frn | (1 << 48)).to_le_bytes());
+            list.extend(e);
+        }
+        resident(ATTR_ATTRIBUTE_LIST, &list)
+    }
+
+    /// A $DATA piece whose run list starts at `vcn`.
+    fn data_at(vcn: u64, runs: &[u8]) -> Vec<u8> {
+        let mut a = non_resident_data(0, runs);
+        a[0x10..0x18].copy_from_slice(&vcn.to_le_bytes());
+        a
+    }
+
+    /// FC-14: a fragmented $MFT whose run list continues through `$ATTRIBUTE_LIST` is read in
+    /// full: the second piece comes from extension record 16, located through the first piece.
+    #[test]
+    fn mft_run_lists_continue_through_the_attribute_list() {
+        const CLUSTER: u64 = 4096;
+        let mut disk = vec![0u8; 64 * CLUSTER as usize];
+        // Piece 1: VCN 0-7 at LCN 2 (in record 0). Piece 2: VCN 8-15 at LCN 20 (in record 16).
+        // Record 16 is byte 16 KiB of $MFT: VCN 4, so LCN 6.
+        let rec16 = record(RECORD_IN_USE, 0, &[data_at(8, &[0x11, 0x08, 0x14])]);
+        let at = 6 * CLUSTER as usize;
+        disk[at..at + RECORD].copy_from_slice(&rec16);
+        // The same list stored non-resident, in one cluster at LCN 30.
+        let list = attribute_list(&[(0, 0), (8, 16)]);
+        let list_value = &list[0x18..0x18 + 0x40];
+        disk[30 * CLUSTER as usize..][..list_value.len()].copy_from_slice(list_value);
+        let mut non_resident_list = non_resident_data(list_value.len() as u64, &[0x11, 0x01, 0x1E]);
+        non_resident_list[0..4].copy_from_slice(&ATTR_ATTRIBUTE_LIST.to_le_bytes());
+        let mut read = |offset: u64, buf: &mut [u8]| {
+            let o = offset as usize;
+            disk.get(o..o + buf.len()).map(|src| buf.copy_from_slice(src)).is_some()
+        };
+        let rec0 = |list: &[(u64, u64)]| {
+            let mut r = record(RECORD_IN_USE, 0, &[attribute_list(list), data_at(0, &[0x11, 0x08, 0x02])]);
+            assert!(apply_fixup(&mut r));
+            r
+        };
+
+        let runs = mft_data_runs(&rec0(&[(0, 0), (8, 16)]), 64, CLUSTER, RECORD, &mut read).unwrap();
+        assert_eq!(runs, vec![(Some(2), 8), (Some(20), 8)]);
+        assert!(runs_cover_records(&runs, CLUSTER, RECORD as u64, 64));
+
+        // A gap between the pieces, and a piece in a record past the runs read so far.
+        assert!(mft_data_runs(&rec0(&[(0, 0), (9, 16)]), 64, CLUSTER, RECORD, &mut read).is_err());
+        assert!(mft_data_runs(&rec0(&[(0, 0), (8, 100)]), 64, CLUSTER, RECORD, &mut read).is_err());
+        let mut with_stored_list = record(RECORD_IN_USE, 0, &[non_resident_list, data_at(0, &[0x11, 0x08, 0x02])]);
+        assert!(apply_fixup(&mut with_stored_list));
+        assert_eq!(mft_data_runs(&with_stored_list, 64, CLUSTER, RECORD, &mut read).unwrap(), runs);
+        // Without a list, record 0's piece is the whole run list, as before.
+        let mut plain = record(RECORD_IN_USE, 0, &[data_at(0, &[0x11, 0x08, 0x02])]);
+        assert!(apply_fixup(&mut plain));
+        assert_eq!(mft_data_runs(&plain, 64, CLUSTER, RECORD, &mut read).unwrap(), vec![(Some(2), 8)]);
     }
 
     /// FC-10: a record shorter than the fixed header is ignored rather than read out of bounds.
