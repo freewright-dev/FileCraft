@@ -411,11 +411,16 @@ impl Preview {
         self.buffer.clear();
     }
 
-    /// Writes the edit buffer. Refuses when the file was changed, replaced or deleted on disk
-    /// since it was loaded, unless `force`. The file is checked and written through one handle,
-    /// so swapping the path (rename, link, junction) in between cannot redirect the write.
+    /// Writes the edit buffer on the calling thread: [`Preview::save_job`], [`SaveJob::run`]
+    /// and [`Preview::finish_save`] in one go. The app runs the job on a worker instead.
+    #[cfg(test)]
     pub fn save(&mut self, force: bool) -> Result<(), SaveError> {
-        let io_err = |e: io::Error| SaveError::Io(e.to_string());
+        let done = self.save_job(force).run();
+        self.finish_save(done)
+    }
+
+    /// Everything a save needs, detached from the preview so it can run on another thread.
+    pub fn save_job(&self, force: bool) -> SaveJob {
         let mut out = Vec::with_capacity(self.buffer.len() + 3);
         if self.bom {
             out.extend_from_slice(b"\xEF\xBB\xBF");
@@ -425,51 +430,104 @@ impl Preview {
         } else {
             out.extend_from_slice(self.buffer.as_bytes());
         }
+        SaveJob { path: self.path.clone(), out, buffer: self.buffer.clone(), loaded: self.loaded, force }
+    }
 
+    /// Applies a finished save. Edits made while it ran keep the buffer dirty.
+    pub fn finish_save(&mut self, done: SaveDone) -> Result<(), SaveError> {
+        if done.path != self.path {
+            return Err(SaveError::Io("another item was opened while saving".into()));
+        }
+        match done.result {
+            Ok(version) => {
+                self.loaded = Some(version);
+                self.dirty = self.editing && self.buffer != done.buffer;
+                self.conflict = None;
+                let truncated = done.buffer.len() > PREVIEW_BYTES;
+                let shown = if truncated { truncate_at_char(&done.buffer, PREVIEW_BYTES) } else { done.buffer };
+                self.content = Content::Text { text: shown, truncated };
+                Ok(())
+            }
+            Err(e) => {
+                if let SaveError::Conflict(kind) = e {
+                    self.conflict = Some(kind);
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// A save detached from the preview (see [`Preview::save_job`]).
+pub struct SaveJob {
+    path: PathBuf,
+    /// Bytes to write: the buffer with its byte-order mark and line endings restored.
+    out: Vec<u8>,
+    buffer: String,
+    loaded: Option<FileVersion>,
+    force: bool,
+}
+
+/// The outcome of a [`SaveJob`], for [`Preview::finish_save`].
+pub struct SaveDone {
+    path: PathBuf,
+    buffer: String,
+    result: Result<FileVersion, SaveError>,
+}
+
+impl SaveJob {
+    /// Writes the file. Refuses when it was changed, replaced or deleted on disk since it was
+    /// loaded, unless `force`. The file is checked and written through one handle, so swapping
+    /// the path (rename, link, junction) in between cannot redirect the write. Memory stays
+    /// within the loaded size: a different length is a conflict found without reading, and
+    /// Overwrite streams the backup however large the file has grown (FC-13).
+    pub fn run(self) -> SaveDone {
+        let result = self.write();
+        SaveDone { path: self.path, buffer: self.buffer, result }
+    }
+
+    fn write(&self) -> Result<FileVersion, SaveError> {
+        let io_err = |e: io::Error| SaveError::Io(e.to_string());
         let file = match open_for_save(&self.path) {
             Ok(mut file) => {
-                // Read at most one byte past the limit: the file may have grown since it was
-                // previewed, and the whole of it must never be held in memory or backed up.
-                let mut original = Vec::new();
-                (&file).take(EDIT_MAX_BYTES + 1).read_to_end(&mut original).map_err(io_err)?;
-                if original.len() as u64 > EDIT_MAX_BYTES {
-                    return Err(SaveError::Io(format!(
-                        "the file is now larger than {} MB and cannot be saved from the editor",
-                        EDIT_MAX_BYTES / (1024 * 1024)
-                    )));
-                }
-                let current = FileVersion::of(&file, &original).map_err(io_err)?;
-                if !force && self.loaded != Some(current) {
-                    let kind = match self.loaded {
-                        Some(loaded) if loaded.id != current.id => Conflict::Replaced,
-                        _ => Conflict::Changed,
-                    };
-                    self.conflict = Some(kind);
-                    return Err(SaveError::Conflict(kind));
+                if !self.force {
+                    self.check_unchanged(&file)?;
                 }
                 let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                write_in_place(&mut file, &name, &original, &out, &backup_dir()).map_err(io_err)?;
+                write_in_place(&mut file, &name, &self.out, &backup_dir()).map_err(io_err)?;
                 file
             }
             // Deleted on disk: only an explicit Overwrite recreates it.
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !force => {
-                self.conflict = Some(Conflict::Deleted);
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !self.force => {
                 return Err(SaveError::Conflict(Conflict::Deleted));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let mut file = fs::File::options().write(true).create_new(true).open(&self.path).map_err(io_err)?;
-                file.write_all(&out).and_then(|()| file.sync_all()).map_err(io_err)?;
+                file.write_all(&self.out).and_then(|()| file.sync_all()).map_err(io_err)?;
                 file
             }
             Err(e) => return Err(io_err(e)),
         };
+        FileVersion::of(&file, &self.out).map_err(io_err)
+    }
 
-        self.loaded = Some(FileVersion::of(&file, &out).map_err(io_err)?);
-        self.dirty = false;
-        self.conflict = None;
-        let truncated = out.len() > PREVIEW_BYTES;
-        let shown = if truncated { truncate_at_char(&self.buffer, PREVIEW_BYTES) } else { self.buffer.clone() };
-        self.content = Content::Text { text: shown, truncated };
+    /// A conflict when the open file is not the version that was loaded. The content is read
+    /// only when the identity and length match, so never more than the loaded size.
+    fn check_unchanged(&self, file: &fs::File) -> Result<(), SaveError> {
+        let io = |e: io::Error| SaveError::Io(e.to_string());
+        let conflict = |kind| Err(SaveError::Conflict(kind));
+        let Some(loaded) = self.loaded else { return conflict(Conflict::Changed) };
+        if file_id(file).map_err(io)? != loaded.id {
+            return conflict(Conflict::Replaced);
+        }
+        if file.metadata().map_err(io)?.len() != loaded.len {
+            return conflict(Conflict::Changed);
+        }
+        let mut original = Vec::with_capacity(loaded.len as usize);
+        file.take(loaded.len + 1).read_to_end(&mut original).map_err(io)?;
+        if FileVersion::of(file, &original).map_err(io)? != loaded {
+            return conflict(Conflict::Changed);
+        }
         Ok(())
     }
 
@@ -540,16 +598,18 @@ fn backup_dir() -> PathBuf {
 }
 
 /// Overwrites `file` with `new` through its open handle, so permissions, attributes and hard
-/// links are kept. `old` is first copied to `backup_dir`; the copy is deleted once the write
-/// completes or `old` has been written back after a failure. Otherwise the error names it.
-fn write_in_place(file: &mut fs::File, name: &str, old: &[u8], new: &[u8], backup_dir: &Path) -> io::Result<()> {
-    let backup = write_backup(backup_dir, name, old)?;
+/// links are kept. The current content is first streamed to `backup_dir` (constant memory,
+/// whatever the file's size); the copy is deleted once the write completes or the original has
+/// been streamed back after a failure. Otherwise the error names it.
+fn write_in_place(file: &mut fs::File, name: &str, new: &[u8], backup_dir: &Path) -> io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    let backup = write_backup(backup_dir, name, file)?;
     match overwrite(file, new) {
         Ok(()) => {
             let _ = fs::remove_file(&backup);
             Ok(())
         }
-        Err(e) if overwrite(file, old).is_ok() => {
+        Err(e) if restore(file, &backup).is_ok() => {
             let _ = fs::remove_file(&backup);
             Err(e)
         }
@@ -557,7 +617,7 @@ fn write_in_place(file: &mut fs::File, name: &str, old: &[u8], new: &[u8], backu
     }
 }
 
-fn write_backup(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+fn write_backup(dir: &Path, name: &str, source: &mut impl Read) -> io::Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     crate::index::ensure_own_dir(dir)?;
     loop {
@@ -567,12 +627,22 @@ fn write_backup(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         };
-        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        if let Err(e) = io::copy(source, &mut file).and_then(|_| file.sync_all()) {
             let _ = fs::remove_file(&path);
             return Err(e);
         }
         return Ok(path);
     }
+}
+
+/// Streams the backup at `backup` back into `file` after a failed write.
+fn restore(file: &mut fs::File, backup: &Path) -> io::Result<()> {
+    let mut source = fs::File::open(backup)?;
+    let len = source.metadata()?.len();
+    file.seek(SeekFrom::Start(0))?;
+    io::copy(&mut source, file)?;
+    file.set_len(len)?;
+    file.sync_all()
 }
 
 fn overwrite(file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
@@ -732,7 +802,7 @@ mod tests {
         let link = dir.join("link");
         crate::index::tests::junction(&link, &target);
 
-        assert!(write_backup(&link, "f.txt", b"secret").is_err());
+        assert!(write_backup(&link, "f.txt", &mut &b"secret"[..]).is_err());
         assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
         fs::remove_dir(&link).unwrap();
         fs::remove_dir_all(&dir).unwrap();
@@ -761,10 +831,11 @@ mod tests {
         fs::remove_dir_all(&vdir).unwrap();
     }
 
-    /// FC-13: saving must never read a file past the edit limit, even when it grew after editing
-    /// began; it refuses instead of reading and backing up the whole file on the UI thread.
+    /// FC-13: a file that grew after editing began is a conflict, found from its length without
+    /// reading it. Overwrite still saves it: the backup is streamed, never held in memory, and
+    /// removed once the write completes. Saving used to refuse such files entirely.
     #[test]
-    fn save_never_reads_past_the_edit_limit() {
+    fn grown_files_are_conflicts_and_overwrite_streams_the_backup() {
         let path = temp("save-grows.txt", b"small");
         let mut p = Preview::load(&path, false);
         p.begin_edit().unwrap();
@@ -772,12 +843,33 @@ mod tests {
         let big = 9 * 1024 * 1024;
         fs::write(&path, vec![b'b'; big]).unwrap();
 
-        for force in [false, true] {
-            let refused = matches!(p.save(force), Err(SaveError::Io(ref m)) if m.contains("larger than 8 MB"));
-            assert!(refused, "save(force={force}) must refuse an oversized file");
-        }
+        assert!(matches!(p.save(false), Err(SaveError::Conflict(Conflict::Changed))));
         assert_eq!(fs::metadata(&path).unwrap().len(), big as u64);
+        assert!(p.save(true).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"small!");
+        assert!(!p.dirty && p.conflict.is_none());
         fs::remove_file(path).unwrap();
+    }
+
+    /// FC-13: a save runs as a detached job (the app runs it on a worker thread). Typing while it
+    /// runs keeps the buffer dirty, and the result is not applied to another item's preview.
+    #[test]
+    fn save_jobs_run_detached_from_the_preview() {
+        let path = temp("save-job.txt", b"one");
+        let mut p = Preview::load(&path, false);
+        p.begin_edit().unwrap();
+        p.buffer = "two".into();
+        p.dirty = true;
+        let job = p.save_job(false);
+        p.buffer.push_str(" and more");
+        let done = std::thread::spawn(move || job.run()).join().unwrap();
+        assert!(p.finish_save(done).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+        assert!(p.dirty, "edits made during the save are still unsaved");
+
+        let job = p.save_job(false);
+        let mut other = Preview::load(&temp("save-job-other.txt", b"x"), false);
+        assert!(other.finish_save(job.run()).is_err());
     }
 
     #[test]
@@ -871,7 +963,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("filecraft-backup-failed-{}", std::process::id()));
         // A read-only handle makes both the write and the restore fail.
         let mut file = fs::File::open(&path).unwrap();
-        let err = write_in_place(&mut file, "failed-write.txt", b"original", b"new content", &dir).unwrap_err();
+        let err = write_in_place(&mut file, "failed-write.txt", b"new content", &dir).unwrap_err();
         assert_eq!(fs::read(&path).unwrap(), b"original");
         let backups: Vec<PathBuf> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
         assert_eq!(backups.len(), 1);
@@ -885,7 +977,7 @@ mod tests {
         let path = temp("no-backup.txt", b"before");
         let dir = std::env::temp_dir().join(format!("filecraft-backup-ok-{}", std::process::id()));
         let mut file = open_for_save(&path).unwrap();
-        write_in_place(&mut file, "no-backup.txt", b"before", b"after, and longer", &dir).unwrap();
+        write_in_place(&mut file, "no-backup.txt", b"after, and longer", &dir).unwrap();
         drop(file);
         assert_eq!(fs::read(&path).unwrap(), b"after, and longer");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);

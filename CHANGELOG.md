@@ -85,9 +85,13 @@ All notable changes to this project are documented here. The format follows
   made most of them fail under load. Saves use unique, exclusively created and synced staging
   files. A cancelled indexing job no longer replaces the cache, and an older snapshot never
   replaces a newer one from another instance. Leftover staging files are cleaned up (FC-07).
-- Saving an inline edit no longer reads, hashes and backs up the whole file on the UI thread. If
-  the file has grown past 8 MB since editing started, the save is refused, even with Overwrite,
-  instead of freezing the window and using memory equal to the file's size (FC-13).
+- Saving an inline edit no longer reads, hashes and backs up the whole file on the UI thread
+  (FC-13):
+  - The save runs on a worker thread, so checking, backing up, writing and flushing no longer
+    freeze the window.
+  - A file whose length changed since it was loaded is a conflict, found without reading it.
+  - Overwrite streams the backup copy instead of holding the file in memory. A file that grew to
+    gigabytes can be overwritten without using memory equal to its size.
 - Extreme file times, which any user can set, and folder sizes that add up past the maximum no
   longer overflow. Debug builds panicked on the UI thread when such a row was shown; release
   builds could show a wrong date or a folder size of zero (FC-19).

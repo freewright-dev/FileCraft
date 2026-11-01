@@ -74,9 +74,10 @@ first frame.
   that mixes `CRLF` and `LF` shows a notice while editing: saving uses its more common ending for
   every line.
   A file longer than the preview is first read in full in the background, and editing starts
-  when that is done. If it has grown past 8 MB by then, editing is refused. If it grows past 8 MB
-  while you are editing, saving is refused too (even with Overwrite), so the file is not read or
-  backed up in full on the interface thread.
+  when that is done. If it has grown past 8 MB by then, editing is refused. Saving runs in the
+  background, so the window stays responsive; while it runs, switching to another result or
+  closing waits for it. A file that grew while you were editing it is reported as changed on disk
+  without being read, and Overwrite still saves it, however large it has become.
 - If the file was changed, replaced or deleted on disk after you started editing, saving stops
   and offers **Overwrite** or **Reload from disk**. The message says which of the three happened
   and what Overwrite does: replace the other changes, write into the file that replaced yours,

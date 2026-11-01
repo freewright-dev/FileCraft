@@ -27,6 +27,13 @@ enum Pending {
     Close,
 }
 
+/// A save running on a worker thread.
+struct Saving {
+    done: std::sync::mpsc::Receiver<crate::preview::SaveDone>,
+    /// What to do once it succeeds.
+    then: Option<Pending>,
+}
+
 #[derive(Clone, Copy)]
 enum RowAction {
     Open,
@@ -70,6 +77,7 @@ pub struct FileCraftApp {
     edit_when_ready: bool,
     editor_focused: bool,
     pending: Option<Pending>,
+    saving: Option<Saving>,
     allow_close: bool,
 
     editor: String,
@@ -141,6 +149,7 @@ impl FileCraftApp {
             edit_when_ready: false,
             editor_focused: false,
             pending: None,
+            saving: None,
             allow_close: false,
             editor,
             editor_confirmed: None,
@@ -247,6 +256,10 @@ impl FileCraftApp {
             return;
         }
         let same = self.selected_row == Some(row);
+        if !same && self.saving.is_some() {
+            self.set_status("Still saving…");
+            return;
+        }
         if !same && self.preview.as_ref().is_some_and(|p| p.dirty) {
             self.pending = Some(Pending::Select(row));
             return;
@@ -374,22 +387,70 @@ impl FileCraftApp {
         }
     }
 
-    fn save_edit(&mut self, force: bool) -> bool {
-        let Some(p) = self.preview.as_mut() else { return false };
-        match p.save(force) {
+    /// Starts saving the edit buffer on a worker thread, so the window stays responsive while
+    /// the file is checked, backed up, written and flushed (FC-13). `then` runs once the save
+    /// succeeds (switching to another result, or closing).
+    fn save_edit(&mut self, force: bool, then: Option<Pending>, ctx: &egui::Context) {
+        if self.saving.is_some() {
+            self.set_status("Still saving…");
+            return;
+        }
+        let Some(p) = self.preview.as_ref() else { return };
+        let job = p.save_job(force);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        let spawned = std::thread::Builder::new().name("save".into()).spawn(move || {
+            let _ = tx.send(job.run());
+            repaint.request_repaint();
+        });
+        match spawned {
+            Ok(_) => {
+                self.saving = Some(Saving { done: rx, then });
+                self.set_status("Saving…");
+            }
+            Err(e) => self.set_status(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Applies a finished save, then continues with whatever waited for it.
+    fn poll_save(&mut self, ctx: &egui::Context) {
+        let Some(saving) = &self.saving else { return };
+        let done = match saving.done.try_recv() {
+            Ok(done) => done,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.saving = None;
+                self.set_status("Save failed: the save thread stopped");
+                return;
+            }
+        };
+        let then = self.saving.take().and_then(|s| s.then);
+        let Some(p) = self.preview.as_mut() else { return };
+        let name = p.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match p.finish_save(done) {
             Ok(()) => {
-                let name = p.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let dirty = p.dirty;
                 self.set_status(format!("Saved {name}"));
-                true
+                match then {
+                    // Typed while saving: ask again rather than drop those edits.
+                    Some(next) if dirty => self.pending = Some(next),
+                    Some(Pending::Select(row)) => {
+                        self.preview = None;
+                        if row < self.hits.len() {
+                            self.select(row);
+                        }
+                    }
+                    Some(Pending::Close) => {
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    None => {}
+                }
             }
             Err(SaveError::Conflict(kind)) => {
                 self.set_status(format!("Not saved. {} Choose Overwrite or Reload.", kind.describe()));
-                false
             }
-            Err(SaveError::Io(e)) => {
-                self.set_status(format!("Save failed: {e}"));
-                false
-            }
+            Err(SaveError::Io(e)) => self.set_status(format!("Save failed: {e}")),
         }
     }
 
@@ -460,7 +521,7 @@ impl FileCraftApp {
             self.focus_search = true;
         }
         if save && self.preview.as_ref().is_some_and(|p| p.editing) {
-            self.save_edit(false);
+            self.save_edit(false, None, ctx);
         }
         if esc {
             if self.show_help || self.show_settings {
@@ -832,14 +893,18 @@ impl FileCraftApp {
 
         if editing {
             let (dirty, conflict) = self.preview.as_ref().map_or((false, None), |p| (p.dirty, p.conflict));
+            let saving = self.saving.is_some();
             ui.horizontal(|ui| {
-                if ui.add_enabled(dirty, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
+                if ui.add_enabled(dirty && !saving, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
                     save = true;
                 }
-                if ui.button(if dirty { "Discard changes" } else { "Done" }).clicked() {
+                if ui.add_enabled(!saving, egui::Button::new(if dirty { "Discard changes" } else { "Done" })).clicked() {
                     cancel = true;
                 }
-                if dirty {
+                if saving {
+                    ui.spinner();
+                    ui.weak("Saving…");
+                } else if dirty {
                     ui.colored_label(ui.visuals().warn_fg_color, "● modified");
                 }
             });
@@ -852,10 +917,10 @@ impl FileCraftApp {
             if let Some(kind) = conflict {
                 ui.horizontal_wrapped(|ui| {
                     ui.colored_label(ui.visuals().error_fg_color, kind.describe());
-                    if ui.button("Overwrite").clicked() {
+                    if ui.add_enabled(!saving, egui::Button::new("Overwrite")).clicked() {
                         force_save = true;
                     }
-                    if ui.button("Reload from disk").clicked() {
+                    if ui.add_enabled(!saving, egui::Button::new("Reload from disk")).clicked() {
                         reload = true;
                     }
                 });
@@ -889,10 +954,10 @@ impl FileCraftApp {
             self.start_edit();
         }
         if save {
-            self.save_edit(false);
+            self.save_edit(false, None, ctx);
         }
         if force_save {
-            self.save_edit(true);
+            self.save_edit(true, None, ctx);
         }
         if cancel && let Some(p) = self.preview.as_mut() {
             p.cancel_edit();
@@ -937,18 +1002,15 @@ impl FileCraftApp {
         }
         let Some(choice) = choice else { return };
         let pending = self.pending.take();
-        let proceed = match choice {
-            0 => self.save_edit(false),
+        match choice {
+            // Saving runs in the background; the pending step follows once it succeeds.
+            0 => return self.save_edit(false, pending, ctx),
             1 => {
                 if let Some(p) = self.preview.as_mut() {
                     p.cancel_edit();
                 }
-                true
             }
-            _ => false,
-        };
-        if !proceed {
-            return;
+            _ => return,
         }
         match pending {
             Some(Pending::Select(row)) => {
@@ -1257,15 +1319,19 @@ impl eframe::App for FileCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_close
-            && self.preview.as_ref().is_some_and(|p| p.dirty)
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Close);
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if let Some(saving) = self.saving.as_mut() {
+                // Close once the save in progress has finished.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                saving.then = Some(Pending::Close);
+            } else if self.preview.as_ref().is_some_and(|p| p.dirty) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending = Some(Pending::Close);
+            }
         }
 
         self.poll();
+        self.poll_save(&ctx);
         if self.pending.is_none() && self.editor_confirm.is_none() {
             self.handle_keys(&ctx);
         }
