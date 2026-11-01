@@ -797,10 +797,9 @@ impl VolumeIndex {
     }
 }
 
-/// Checks that a loaded cache's orders are sorted the way [`VolumeBuilder::finish`] sorts them
-/// (MIN-04). Name, size and date are checked exactly. For the path order, each folder's entries
-/// must be contiguous and sorted by name; checking the order of the folders themselves would
-/// mean recomputing their ranks on every start. Linear time.
+/// Checks that a loaded cache's orders are sorted exactly the way [`VolumeBuilder::finish`]
+/// sorts them (MIN-04): name, size and date in linear time; path after recomputing the folders'
+/// ranks, which sorts the folders only.
 fn check_orders(entries: &[Entry], lower: &str, by_name: &[u32], by_path: &[u32], by_size: &[u32], by_date: &[u32]) -> io::Result<()> {
     let lower_of = |i: u32| {
         let e = &entries[i as usize];
@@ -816,18 +815,15 @@ fn check_orders(entries: &[Entry], lower: &str, by_name: &[u32], by_path: &[u32]
         return Err(invalid("sort order not sorted"));
     }
 
-    let mut finished = vec![false; entries.len()];
-    for w in by_path.windows(2) {
-        let (pa, pb) = (entries[w[0] as usize].parent, entries[w[1] as usize].parent);
-        let ok = if pa == pb {
-            by_lower(w[0], w[1]) == Ordering::Less
-        } else {
-            finished[pa as usize] = true;
-            !finished[pb as usize]
-        };
-        if !ok {
-            return Err(invalid("path order not sorted"));
-        }
+    // The same key `finish` sorts by. Ranking the folders sorts only the folders, a fraction of
+    // the entries, so this stays cheap next to reading the cache.
+    let rank = directory_ranks(entries, &lower_of);
+    let by_parent_then_name = |a: u32, b: u32| {
+        let (pa, pb) = (entries[a as usize].parent, entries[b as usize].parent);
+        rank[pa as usize].cmp(&rank[pb as usize]).then_with(|| by_lower(a, b))
+    };
+    if !increasing(by_path, &by_parent_then_name) {
+        return Err(invalid("path order not sorted"));
     }
     Ok(())
 }
@@ -1192,6 +1188,20 @@ pub mod tests {
             a.swap_with_slice(b);
             load_error(&format!("unsorted-{label}"), &bytes, 'C');
         }
+
+        // Folder groups that are each contiguous and sorted, but in the wrong order: `src`'s
+        // entries moved ahead of `docs`'. Only a check of the folders' own order catches this.
+        let path_at = orders_at + (8 + listed * 4) + 8;
+        let ids: Vec<u32> = good[path_at..path_at + listed * 4].chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let names_of = |ids: &[u32]| ids.iter().map(|&i| v.name(i).to_string()).collect::<Vec<_>>();
+        assert_eq!(names_of(&ids[3..]), ["Notes.TXT", "readme.md", "main.rs"]);
+        let mut moved = ids.clone();
+        moved[3..].rotate_right(1);
+        let mut bytes = good.clone();
+        for (k, id) in moved.iter().enumerate() {
+            bytes[path_at + 4 * k..path_at + 4 * k + 4].copy_from_slice(&id.to_le_bytes());
+        }
+        load_error("folders-out-of-order", &bytes, 'C');
     }
 
     /// FC-02: the audit's 21-byte cache with an overflowing timestamp used to panic (and abort).

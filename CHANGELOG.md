@@ -117,9 +117,8 @@ All notable changes to this project are documented here. The format follows
 - `!` and the `file:`, `folder:`, `ext:`, `size:`, `dm:`, `regex:` and `path:` prefixes apply to a
   quoted phrase written after them: `!"old copy"` and `folder:"my docs"` work. They were searched
   for as text before (`!old copy`, `folder:my docs`). Inside quotes everything stays literal (MIN-04).
-- Loading a cache checks that its sort orders are sorted, so a tampered cache can no longer show
-  results out of order. Name, size and date are checked exactly. For path, each folder's entries
-  must be contiguous and sorted by name (MIN-04).
+- Loading a cache checks that its sort orders are sorted exactly as a rebuild would sort them, so
+  a tampered cache can no longer show results out of order (MIN-04).
 - Indexing fails with a clear error instead of corrupting the index when a drive exceeds the
   index format's limits: about 4 billion entries (the folder scan's id counter used to wrap to the
   root's id) or 4 GiB of file names (offsets used to wrap onto other names) (MIN-04).

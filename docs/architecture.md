@@ -86,9 +86,8 @@ before the index is used:
 - parent ids are in range, entry 0 is a root folder, and every entry with a parent reaches
   the root through its parent links (no loops, no unused slot along the way), so full paths are
   always rebuilt completely, at any depth;
-- each sort order lists every entry with a parent exactly once, and is sorted: name, size and
-  date exactly; for path, each folder's entries are contiguous and sorted by name (the order of
-  the folders themselves is not rechecked, which would cost a sort on every start);
+- each sort order lists every entry with a parent exactly once, and is sorted exactly as a
+  rebuild would sort it (the path check recomputes the folder ranks, which sorts only the folders);
 - no bytes are left over.
 
 A cache that fails any check is ignored and rebuilt; a malformed cache never causes a panic.
