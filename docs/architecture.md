@@ -2,15 +2,16 @@
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.rs` | Window setup (`eframe`) and app icon |
+| `src/main.rs` | Window setup (`eframe`) and app icon; dispatches `--mft-helper` to the helper |
 | `src/app.rs` | The UI: search box, results table, preview/editor, status bar, settings, keys |
 | `src/index.rs` | `VolumeIndex` data model, builder, sort orders, folder sizes, disk cache |
 | `src/mft.rs` | NTFS master file table reader (administrator) |
+| `src/mft_helper.rs` | The elevated helper process that runs `mft.rs` for the unelevated window, and its pipe protocol |
 | `src/walk.rs` | Parallel directory walk (fallback, no admin) |
 | `src/indexer.rs` | Drive discovery and background (re)indexing per drive |
 | `src/search.rs` | Query language, parallel filtering, cross-drive merge, background searcher |
 | `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts) |
-| `src/actions.rs` | Shell integration: open, reveal, properties, external editor, elevation |
+| `src/actions.rs` | Shell integration: open, reveal, properties, external editor |
 | `src/util.rs` | FILETIME and size formatting, local-time helpers, verbatim file-system paths (`fs_path`) and detection of names Win32 would rewrite (`win32_alias`) |
 
 ## Index layout
@@ -64,9 +65,21 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   own stack and walks them depth-first. Cancellation is checked between entries, not only
   between folders.
 - **Indexer** (`indexer.rs`) — one thread per drive: load the cache and publish it, then rebuild
-  if the cache is missing or too old (MFT when elevated and NTFS, else walk, with walk as the
-  fallback when the MFT read fails), save the cache and publish again. Each drive has its own
-  cancel flag. Progress is exposed through atomics that the status bar reads.
+  if the cache is missing or too old (MFT for NTFS drives when the helper runs or the window
+  itself is elevated, else walk, with walk as the fallback when the MFT read fails), save the
+  cache and publish again. Each drive has its own cancel flag. Progress is exposed through
+  atomics that the status bar reads.
+- **NTFS helper** (`mft_helper.rs`) — the window never needs administrator rights.
+  - **Start.** *Fast NTFS indexing* creates a named pipe with a random name, single instance
+    (`FILE_FLAG_FIRST_PIPE_INSTANCE`) and local only, then starts `FileCraft.exe --mft-helper
+    <pipe>` with the `runas` verb.
+  - **Connect.** The helper accepts only FileCraft's pipe names. It opens the pipe with
+    `SECURITY_IDENTIFICATION`, so whoever serves the pipe cannot impersonate its elevated token.
+  - **Serve.** It answers one request at a time ("index drive X") with progress messages and
+    the index in the cache format. It writes no files, reads no settings, starts nothing, and
+    exits when the pipe closes.
+  - **Check.** The window parses what it receives with `VolumeIndex::from_bytes`, which applies
+    every check a cache file gets. NTFS drives are therefore read one after another.
 
 ## Cache format
 

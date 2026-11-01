@@ -13,8 +13,9 @@ fixed drives and filters millions of entries as you type.
 ## Features
 
 - **Searches all drives at once**, with results sortable by name, path, size and date.
-- **NTFS MFT indexing**: when run as administrator it reads each drive's master file table
-  directly, which indexes a drive in seconds. Without admin it falls back to a parallel folder scan.
+- **NTFS MFT indexing**: with **⚡ Fast NTFS indexing** on, a small elevated helper reads each
+  drive's master file table directly, which indexes a drive in seconds; the window itself never
+  needs administrator rights. Otherwise it uses a parallel folder scan.
 - **Instant startup**: indexes are cached on disk and refreshed in the background.
 - **Everything-style queries**: `ext:pdf`, `size:>100mb`, `dm:today`, `folder:src`, wildcards,
   `!not`, `a|b`, path terms and `regex:`.
@@ -39,7 +40,7 @@ cargo build --release
 .\target\release\FileCraft.exe
 ```
 
-Run it as administrator (or click **⚡ Run as admin** in the status bar) for MFT indexing.
+Click **⚡ Fast NTFS indexing** in the status bar for MFT indexing (one UAC prompt for the helper).
 
 ```powershell
 cargo test                                                        # unit tests

@@ -3,6 +3,7 @@
 use crate::actions;
 use crate::index::{ATTR_HIDDEN, ATTR_SYSTEM, Index, SortKey, Source, data_dir};
 use crate::indexer::{Drive, IndexEvent, Indexer, Phase, fixed_drives};
+use crate::mft_helper::MftHelper;
 use crate::preview::{Content, Preview, PreviewLoader, SaveError};
 use crate::search::{Hit, SearchOptions, Searcher, Sort};
 use crate::util::{format_filetime, format_size, fs_path, group_digits, local_offset, win32_alias};
@@ -78,6 +79,8 @@ pub struct FileCraftApp {
     editor_focused: bool,
     pending: Option<Pending>,
     saving: Option<Saving>,
+    /// The NTFS helper being started (UAC prompt, connection).
+    helper_start: Option<std::sync::mpsc::Receiver<std::io::Result<MftHelper>>>,
     allow_close: bool,
 
     editor: String,
@@ -150,6 +153,7 @@ impl FileCraftApp {
             editor_focused: false,
             pending: None,
             saving: None,
+            helper_start: None,
             allow_close: false,
             editor,
             editor_confirmed: None,
@@ -377,13 +381,43 @@ impl FileCraftApp {
         self.set_status("Re-indexing all drives…");
     }
 
-    fn restart_as_admin(&mut self, ctx: &egui::Context) {
-        match actions::restart_elevated() {
-            Ok(()) => {
-                self.allow_close = !self.preview.as_ref().is_some_and(|p| p.dirty);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    /// Starts the elevated NTFS helper (UAC prompt) on a background thread. The window keeps
+    /// running without administrator rights (FC-18); NTFS drives are re-indexed once it is up.
+    fn start_fast_indexing(&mut self, ctx: &egui::Context) {
+        if self.helper_start.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        let spawned = std::thread::Builder::new().name("start NTFS helper".into()).spawn(move || {
+            let _ = tx.send(MftHelper::launch());
+            repaint.request_repaint();
+        });
+        match spawned {
+            Ok(_) => {
+                self.helper_start = Some(rx);
+                self.set_status("Starting the NTFS helper…");
             }
-            Err(e) => self.set_status(format!("Could not restart as administrator: {e}")),
+            Err(e) => self.set_status(format!("Could not start the NTFS helper: {e}")),
+        }
+    }
+
+    fn poll_helper_start(&mut self) {
+        let Some(rx) = &self.helper_start else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(std::io::Error::other("the start thread stopped")),
+        };
+        self.helper_start = None;
+        match result {
+            Ok(helper) => {
+                self.indexer.set_mft_helper(helper);
+                let drives = self.included_drives();
+                self.indexer.start(drives, self.max_age(), true);
+                self.set_status("Fast NTFS indexing is on: re-indexing NTFS drives…");
+            }
+            Err(e) => self.set_status(format!("Fast NTFS indexing is not available: {e}")),
         }
     }
 
@@ -566,9 +600,11 @@ impl FileCraftApp {
                     self.rescan();
                     ui.close();
                 }
-                if !self.indexer.elevated && ui.button("Restart as administrator (fast NTFS indexing)").clicked() {
+                if !self.indexer.fast_indexing()
+                    && ui.add_enabled(self.helper_start.is_none(), egui::Button::new("Fast NTFS indexing (asks for administrator rights)")).clicked()
+                {
                     ui.close();
-                    self.restart_as_admin(ctx);
+                    self.start_fast_indexing(ctx);
                 }
                 if ui.button("Settings…").clicked() {
                     self.show_settings = true;
@@ -668,13 +704,16 @@ impl FileCraftApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if !self.indexer.elevated
+                if !self.indexer.fast_indexing()
                     && ui
-                        .small_button("⚡ Run as admin")
-                        .on_hover_text("Restart elevated to read the NTFS master file table directly: indexing takes seconds instead of minutes.")
+                        .add_enabled(self.helper_start.is_none(), egui::Button::new("⚡ Fast NTFS indexing").small())
+                        .on_hover_text(
+                            "Starts a small helper with administrator rights (one UAC prompt) that reads the NTFS master \
+                             file table: indexing takes seconds instead of minutes. FileCraft itself keeps running without them.",
+                        )
                         .clicked()
                 {
-                    self.restart_as_admin(ctx);
+                    self.start_fast_indexing(ctx);
                 }
                 let statuses: Vec<_> = self.indexer.status.lock().unwrap().values().cloned().collect();
                 for s in statuses.iter().rev() {
@@ -1332,6 +1371,7 @@ impl eframe::App for FileCraftApp {
 
         self.poll();
         self.poll_save(&ctx);
+        self.poll_helper_start();
         if self.pending.is_none() && self.editor_confirm.is_none() {
             self.handle_keys(&ctx);
         }

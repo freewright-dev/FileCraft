@@ -6,6 +6,7 @@ mod app;
 mod index;
 mod indexer;
 mod mft;
+mod mft_helper;
 mod preview;
 mod search;
 mod util;
@@ -14,6 +15,13 @@ mod walk;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // The elevated NTFS reader the window starts for fast indexing (see `mft_helper`).
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|a| a == mft_helper::HELPER_ARG) {
+        let pipe = args.next().unwrap_or_default();
+        std::process::exit(mft_helper::run_helper(&pipe));
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("FileCraft")

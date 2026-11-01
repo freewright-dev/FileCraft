@@ -670,8 +670,14 @@ impl VolumeIndex {
     }
 
     fn write_to(&self, file: fs::File) -> io::Result<()> {
+        let mut w = BufWriter::with_capacity(1 << 20, file);
+        self.serialize(&mut w)?;
+        w.into_inner().map_err(|e| e.into_error())?.sync_all()
+    }
+
+    /// Writes the index in the cache format (also sent by the NTFS helper, see `mft_helper`).
+    pub fn serialize(&self, w: &mut impl Write) -> io::Result<()> {
         {
-            let mut w = BufWriter::with_capacity(1 << 20, file);
             w.write_all(CACHE_MAGIC)?;
             w.write_all(&(self.letter as u32).to_le_bytes())?;
             w.write_all(&[matches!(self.source, Source::Mft) as u8])?;
@@ -698,7 +704,7 @@ impl VolumeIndex {
                     w.write_all(&id.to_le_bytes())?;
                 }
             }
-            w.into_inner().map_err(|e| e.into_error())?.sync_all()
+            Ok(())
         }
     }
 
@@ -706,7 +712,15 @@ impl VolumeIndex {
     /// than a panic, so a corrupt or foreign cache is ignored and rebuilt.
     pub fn load(path: &Path, letter: char) -> io::Result<VolumeIndex> {
         let data = read_with_budget(path, MAX_CACHE_BYTES)?;
-        let mut r = Reader { data: &data, pos: 0 };
+        Self::from_bytes(&data, letter)
+    }
+
+    /// Parses an index in the cache format with every check [`VolumeIndex::load`] applies.
+    pub fn from_bytes(data: &[u8], letter: char) -> io::Result<VolumeIndex> {
+        if data.len() as u64 > MAX_CACHE_BYTES {
+            return Err(invalid("index too large"));
+        }
+        let mut r = Reader { data, pos: 0 };
         if r.bytes(8)? != CACHE_MAGIC {
             return Err(invalid("unknown cache format"));
         }

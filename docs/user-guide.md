@@ -1,7 +1,8 @@
 # User guide
 
 FileCraft indexes every file and folder on your fixed drives and finds them as you type,
-like [Everything](https://www.voidtools.com/). Start `FileCraft.exe`; there are no command-line options.
+like [Everything](https://www.voidtools.com/). Start `FileCraft.exe`; there are no command-line options (FileCraft starts its own NTFS
+helper with an internal one).
 
 ## Window
 
@@ -27,11 +28,14 @@ its cache is older than the configured age (default 60 minutes); **File → Re-i
 
 | Mode | When | Speed |
 | --- | --- | --- |
-| **NTFS MFT** | Running as administrator, NTFS drive | Reads the master file table directly: seconds per drive |
+| **NTFS MFT** | Fast NTFS indexing is on (or FileCraft runs as administrator), NTFS drive | Reads the master file table directly: seconds per drive |
 | **Folder scan** | Otherwise (or if the MFT read fails) | Parallel directory walk: ~20 s for 4 million files on an SSD, longer on hard disks |
 
-Use **⚡ Run as admin** in the status bar (or **File → Restart as administrator**) to restart
-elevated. A folder scan cannot see into folders your account cannot open; the MFT read sees
+Click **⚡ Fast NTFS indexing** in the status bar (or **File → Fast NTFS indexing**) to turn it
+on. Windows asks once for administrator rights, for a small helper that only reads the master
+file tables and hands the results to FileCraft. FileCraft itself keeps running without
+administrator rights, so opening files, editing and the external editor never run elevated. The
+helper ends when FileCraft closes. A folder scan cannot see into folders your account cannot open; the MFT read sees
 everything on the volume. A heavily fragmented master file table is read in full too; if its
 layout cannot be read consistently, FileCraft uses the folder scan instead of a partial index.
 

@@ -12,8 +12,9 @@ All notable changes to this project are documented here. The format follows
   every fixed drive.
 - App icon (an orange folder with a magnifying glass), embedded in the exe and shown in the window and taskbar.
 - Hero screenshot in `docs/media/`.
-- NTFS master file table indexing when running as administrator, with a parallel folder scan as
-  the fallback, and a **Run as admin** button to restart elevated.
+- NTFS master file table indexing, with a parallel folder scan as the fallback. **⚡ Fast NTFS
+  indexing** starts a small elevated helper (one UAC prompt) that reads the master file tables for
+  the window, which keeps running without administrator rights (FC-18).
 - Per-drive index cache in `%LOCALAPPDATA%\FileCraft\index`, loaded at startup and refreshed
   in the background when older than a configurable age (default 60 minutes); F5 re-indexes.
 - Everything-style query language: AND terms, `"phrases"`, `!negation`, `a|b`, wildcards, path
@@ -132,7 +133,7 @@ All notable changes to this project are documented here. The format follows
 - The cache of unfiltered results (an empty query) holds the snapshot it was computed on instead of
   only its address, so a newer snapshot allocated at a reused address can never be shown the old
   results (MIN-04).
-- Failures of Open and Run as admin report what ShellExecute returned (for example "no application
+- Failures of Open report what ShellExecute returned (for example "no application
   is associated with this kind of file") instead of an unrelated last OS error (MIN-04).
 - On a volume whose `$MFT` is fragmented enough that its run list continues in an
   `$ATTRIBUTE_LIST`, the NTFS reader no longer indexes only the records the first runs cover
@@ -158,5 +159,11 @@ All notable changes to this project are documented here. The format follows
     environment, and shows the program it resolves to. It asks once per command per session.
   - Cache saves, the staging cleanup and save backups refuse to write when `%LOCALAPPDATA%\FileCraft`,
     `index` or `backup` is a junction or symbolic link, which could aim them at a protected folder.
-  The UI still runs elevated. Splitting the NTFS reader into a separate privileged helper remains
-  the long-term fix.
+- Fast NTFS indexing no longer runs the whole window as administrator (FC-18). **Run as admin**
+  restarted FileCraft elevated, so opening files, editing, saving, backups, cache writes and the
+  external editor all ran with administrator rights on state that unelevated programs can change.
+  Now only a small helper runs elevated:
+  - it reads master file tables and nothing else;
+  - it is reached through a single-instance, local-only pipe and cannot be impersonated through it;
+  - the window checks everything it sends like a cache file.
+  The safeguards above still apply when FileCraft itself is started as administrator.

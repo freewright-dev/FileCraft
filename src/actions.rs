@@ -253,18 +253,6 @@ fn resolve_program(program: &str) -> io::Result<std::path::PathBuf> {
     })
 }
 
-/// Starts a new elevated instance of this program (UAC prompt). Returns Ok when it launched.
-pub fn restart_elevated() -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        let exe = std::env::current_exe()?;
-        shell_execute("runas", &exe.to_string_lossy(), None)
-    }
-    #[cfg(not(windows))]
-    {
-        Err(io::Error::other("not supported on this platform"))
-    }
-}
 
 #[cfg(test)]
 mod tests {

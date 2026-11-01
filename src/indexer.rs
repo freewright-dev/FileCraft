@@ -2,6 +2,7 @@
 //! load the on-disk cache first (instant), then rebuild via the MFT (admin) or a folder walk.
 
 use crate::index::{Source, VolumeIndex, cache_path};
+use crate::mft_helper::MftHelper;
 use crate::{mft, walk};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::collections::BTreeMap;
@@ -59,7 +60,10 @@ pub struct Indexer {
     tx: Sender<IndexEvent>,
     /// Cancel flag of the running job for each drive.
     cancels: BTreeMap<char, Arc<AtomicBool>>,
+    /// The window itself runs as administrator (started that way): the MFT is read in-process.
     pub elevated: bool,
+    /// The elevated NTFS helper, when the user started it (FC-18).
+    helper: Option<Arc<MftHelper>>,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -72,8 +76,19 @@ impl Indexer {
             tx,
             cancels: BTreeMap::new(),
             elevated: is_elevated(),
+            helper: None,
             notify: Arc::new(notify),
         }
+    }
+
+    /// Uses `helper` to read NTFS drives from the next job on.
+    pub fn set_mft_helper(&mut self, helper: MftHelper) {
+        self.helper = Some(Arc::new(helper));
+    }
+
+    /// Whether NTFS drives are read from the master file table (in-process or by the helper).
+    pub fn fast_indexing(&self) -> bool {
+        self.elevated || self.helper.as_ref().is_some_and(|h| h.is_alive())
     }
 
     /// Stops indexing a drive and forgets its status.
@@ -115,6 +130,7 @@ impl Indexer {
                 tx: self.tx.clone(),
                 cancel,
                 elevated: self.elevated,
+                helper: self.helper.clone(),
                 notify: Arc::clone(&self.notify),
                 progress: st.progress,
                 total: st.total,
@@ -149,6 +165,7 @@ struct Job {
     tx: Sender<IndexEvent>,
     cancel: Arc<AtomicBool>,
     elevated: bool,
+    helper: Option<Arc<MftHelper>>,
     notify: Arc<dyn Fn() + Send + Sync>,
     progress: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
@@ -200,7 +217,8 @@ impl Job {
             return;
         }
 
-        let use_mft = self.elevated && self.drive.is_ntfs();
+        let helper = self.helper.as_ref().filter(|h| h.is_alive());
+        let use_mft = self.drive.is_ntfs() && (self.elevated || helper.is_some());
         self.update(|s| {
             if have_index {
                 s.refreshing = true;
@@ -210,10 +228,15 @@ impl Job {
         });
 
         let skipped = AtomicUsize::new(0);
-        let mut result = if use_mft {
-            mft::read_volume(letter, &self.progress, &self.total, &self.cancel)
-        } else {
-            Err(anyhow::anyhow!("not elevated"))
+        let mut result = match (use_mft, helper) {
+            (false, _) => Err(anyhow::anyhow!("no administrator rights")),
+            (true, _) if self.elevated => mft::read_volume(letter, &self.progress, &self.total, &self.cancel),
+            // The helper cannot be interrupted; a cancelled job just drops its result.
+            (true, Some(h)) => h.read_volume(letter, &self.progress, &self.total).and_then(|v| {
+                anyhow::ensure!(!self.cancel.load(Ordering::Relaxed), "cancelled");
+                Ok(v)
+            }),
+            (true, None) => unreachable!("use_mft implies elevation or a helper"),
         };
         if result.is_err() && !self.cancel.load(Ordering::Relaxed) {
             self.total.store(0, Ordering::Relaxed);
