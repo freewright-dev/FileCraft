@@ -78,6 +78,11 @@ pub fn read_volume(
     if record_count > MAX_MFT_RECORDS {
         anyhow::bail!("$MFT has more than {MAX_MFT_RECORDS} records");
     }
+    // A run list continued through $ATTRIBUTE_LIST is not read: fail closed so the folder scan
+    // runs instead of an index that silently misses part of the volume (FC-14).
+    if !runs_cover_records(&runs, cluster, record_size as u64, record_count) {
+        anyhow::bail!("$MFT data runs in record 0 do not cover the whole table ($ATTRIBUTE_LIST is not supported)");
+    }
     let record_count = record_count as usize;
     total.store(record_count, Ordering::Relaxed);
     let mut recs = vec![Rec::default(); record_count];
@@ -111,6 +116,9 @@ pub fn read_volume(
             remaining -= want as u64;
             progress.store(frn, Ordering::Relaxed);
         }
+    }
+    if frn < record_count {
+        anyhow::bail!("$MFT data runs covered {frn} of {record_count} records");
     }
 
     Ok(build(letter, &recs, &names, start))
@@ -311,10 +319,12 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
 
 /// Decodes the data runs of the unnamed $DATA attribute in $MFT's own record:
 /// `(starting LCN or None when sparse, length in clusters)`. Fails on an empty run, a negative or
-/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters`.
+/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters`. Also fails
+/// when the attribute does not start at VCN 0: that is an extension piece of a run list kept in
+/// an `$ATTRIBUTE_LIST`, which is not supported (FC-14).
 fn mft_runs(rec0: &[u8], total_clusters: u64) -> Option<Vec<(Option<u64>, u64)>> {
     let (_, attr) = attributes(rec0).find(|(ty, a)| *ty == ATTR_DATA && a[8] != 0 && a[9] == 0)?;
-    if attr.len() < 0x22 {
+    if attr.len() < 0x22 || u64_at(attr, 0x10) != 0 {
         return None;
     }
     let mut pos = u16_at(attr, 0x20) as usize;
@@ -359,6 +369,16 @@ fn mft_runs(rec0: &[u8], total_clusters: u64) -> Option<Vec<(Option<u64>, u64)>>
         pos += off_size;
     }
     (!runs.is_empty()).then_some(runs)
+}
+
+/// Whether `runs` (in clusters of `cluster` bytes) hold at least `record_count` records. When
+/// $MFT is fragmented enough, record 0 holds only the first part of its run list and the rest
+/// lives in extension records, so the runs found there can cover less than the whole table.
+fn runs_cover_records(runs: &[(Option<u64>, u64)], cluster: u64, record_size: u64, record_count: u64) -> bool {
+    let bytes = runs
+        .iter()
+        .try_fold(0u64, |acc, &(_, clusters)| acc.checked_add(clusters.checked_mul(cluster)?));
+    bytes.is_some_and(|b| b / record_size >= record_count)
 }
 
 /// Keeps records reachable from the root through valid parents and turns them into an index.
@@ -531,6 +551,25 @@ mod tests {
         // 0x20 clusters at LCN 0x1000 do not fit a volume of 0x1010 clusters.
         assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1010), None);
         assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1020), Some(vec![(Some(0x1000), 0x20)]));
+    }
+
+    /// FC-14: when $MFT's run list continues in an extension record ($ATTRIBUTE_LIST), record 0
+    /// holds only part of it. Reading must fail (and fall back to the folder scan) instead of
+    /// silently indexing the records the first runs happen to cover.
+    #[test]
+    fn partial_mft_run_lists_are_rejected() {
+        // 0x20 clusters of 4 KiB hold 128 records of 1 KiB.
+        let runs = [(Some(0x1000), 0x10), (None, 0x10)];
+        assert!(runs_cover_records(&runs, 4096, 1024, 128));
+        assert!(!runs_cover_records(&runs, 4096, 1024, 129));
+        assert!(!runs_cover_records(&[(Some(1), u64::MAX)], 4096, 1024, 1));
+
+        // An attribute that starts past VCN 0 is an extension piece, not the start of the list.
+        let mut attr = non_resident_data(0, &[0x21, 0x20, 0x00, 0x10]);
+        attr[0x10..0x18].copy_from_slice(&5u64.to_le_bytes());
+        let mut rec = record(RECORD_IN_USE, 0, &[attr]);
+        assert!(apply_fixup(&mut rec));
+        assert_eq!(mft_runs(&rec, 0x2000), None);
     }
 
     /// FC-10: a record shorter than the fixed header is ignored rather than read out of bounds.

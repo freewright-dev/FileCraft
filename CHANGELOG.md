@@ -97,6 +97,10 @@ All notable changes to this project are documented here. The format follows
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
+- On a volume whose `$MFT` is fragmented enough that its run list continues in an
+  `$ATTRIBUTE_LIST`, the NTFS reader no longer indexes only the records the first runs cover
+  while reporting the drive as ready. It checks that the runs cover the whole table and start at
+  VCN 0, and falls back to the folder scan otherwise (FC-14).
 - `cargo deny check` passes again: the lockfile moves `clipboard-win` from the yanked 5.4.1 to
   5.4.3, which the CI supply-chain job rejected (FC-16).
 

@@ -42,7 +42,10 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   walk:
   - geometry that is incomplete or inconsistent with the volume size;
   - more than 64 Mi records;
-  - a data run that is empty, has a negative or overflowing LCN, or ends past the volume.
+  - a data run that is empty, has a negative or overflowing LCN, or ends past the volume;
+  - a `$DATA` attribute in record 0 that does not start at VCN 0, or runs that hold fewer records
+    than `MftValidDataLength` implies (a fragmented `$MFT` whose run list continues in an
+    `$ATTRIBUTE_LIST`, which is not read).
 
   Records shorter than the fixed header are skipped.
 - **Walk** (`walk.rs`) — worker threads pull directories from a shared queue. Every entry gets its

@@ -32,7 +32,8 @@ its cache is older than the configured age (default 60 minutes); **File → Re-i
 
 Use **⚡ Run as admin** in the status bar (or **File → Restart as administrator**) to restart
 elevated. A folder scan cannot see into folders your account cannot open; the MFT read sees
-everything on the volume.
+everything on the volume. On a volume whose master file table is so fragmented that its layout
+does not fit in its first record, FileCraft cannot read it directly and uses the folder scan.
 
 The index does not follow changes live: files created or deleted after the last index appear on
 the next re-index.
