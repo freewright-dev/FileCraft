@@ -24,6 +24,7 @@ const KEY_OPTIONS: &str = "search_options";
 const KEY_SORT: &str = "sort";
 const KEY_QUICK_SEARCH: &str = "quick_search";
 const KEY_HOTKEY: &str = "quick_search_hotkey";
+const KEY_CLOSE_NOTICE_SHOWN: &str = "close_notice_shown";
 /// Upper end of the "re-index when older than" setting: one week.
 const MAX_AGE_LIMIT_MINUTES: u64 = 10_080;
 
@@ -37,6 +38,27 @@ struct Saving {
     done: std::sync::mpsc::Receiver<crate::preview::SaveDone>,
     /// What to do once it succeeds.
     then: Option<Pending>,
+}
+
+/// What closing the window comes to, once no edits stand in the way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CloseStep {
+    Exit,
+    Hide,
+    /// Say once that FileCraft keeps running, before hiding for the first time.
+    NoticeThenHide,
+}
+
+/// The notice only makes sense on a window the user can see and has just closed; anything else
+/// (an outside close of a hidden window) must not use it up unseen.
+fn close_step(has_background: bool, quitting: bool, notice_shown: bool, window_visible: bool) -> CloseStep {
+    if !has_background || quitting {
+        CloseStep::Exit
+    } else if notice_shown || !window_visible {
+        CloseStep::Hide
+    } else {
+        CloseStep::NoticeThenHide
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +123,9 @@ pub struct FileCraftApp {
     /// The last valid hotkey that was asked for.
     hotkey: Hotkey,
     hotkey_error: Option<String>,
+    /// The notice about keeping running is open.
+    close_notice: bool,
+    close_notice_shown: bool,
 
     editor: String,
     /// Elevated only: the editor command the user agreed to run as administrator this session.
@@ -191,6 +216,8 @@ impl FileCraftApp {
             hotkey_text: hotkey.to_string(),
             hotkey,
             hotkey_error: None,
+            close_notice: false,
+            close_notice_shown: get(KEY_CLOSE_NOTICE_SHOWN).is_some_and(|s| s == "1"),
             editor,
             editor_confirmed: None,
             editor_confirm: None,
@@ -250,11 +277,57 @@ impl FileCraftApp {
 
     /// Finishes closing the window, now that no edits stand in the way.
     fn close_window(&mut self, ctx: &egui::Context) {
-        if self.background.is_some() && !self.quitting {
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false));
-        } else {
-            self.allow_close = true;
-            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+        let visible = ctx.input(|i| i.viewport().visible()) != Some(false);
+        match close_step(self.background.is_some(), self.quitting, self.close_notice_shown, visible) {
+            CloseStep::Exit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+            }
+            CloseStep::Hide => ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false)),
+            CloseStep::NoticeThenHide => self.close_notice = true,
+        }
+    }
+
+    /// Says once, the first time closing the window would hide it, that FileCraft keeps running and
+    /// how to quit. It is a dialog rather than a tray balloon, because Windows drops those silently
+    /// while notifications are off, which would use up the only time this is shown.
+    fn close_notice_modal(&mut self, ctx: &egui::Context) {
+        if !self.close_notice {
+            return;
+        }
+        let mut keep_running = false;
+        let mut exit = false;
+        let modal = egui::Modal::new(egui::Id::new("close-notice")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.heading("FileCraft keeps running");
+            ui.label(format!(
+                "Closing the window keeps FileCraft in the notification area, so {} can open quick search from anywhere.",
+                self.hotkey
+            ));
+            if let Some(err) = &self.hotkey_error {
+                ui.add_space(4.0);
+                ui.colored_label(ui.visuals().error_fg_color, format!("{err}. Choose another hotkey in File > Settings."));
+            }
+            ui.add_space(4.0);
+            ui.label("To quit, use File > Exit or right-click the icon. To close normally instead, turn off quick search in File > Settings.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                keep_running = ui.button("Keep running").clicked();
+                exit = ui.button("Exit now").clicked();
+            });
+        });
+        // Dismissing it leaves the window open and answers nothing, so it can ask again.
+        if modal.should_close() && !keep_running && !exit {
+            self.close_notice = false;
+        }
+        if keep_running || exit {
+            self.close_notice = false;
+            self.close_notice_shown = true;
+        }
+        if exit {
+            self.quit(ctx);
+        } else if keep_running {
+            self.close_window(ctx);
         }
     }
 
@@ -1407,9 +1480,9 @@ impl FileCraftApp {
                     });
                     ui.add_space(10.0);
                     ui.strong("Quick search bar");
-                    ui.label(format!("{} opens it from anywhere (File → Settings to change or turn off).", self.hotkey_text));
+                    ui.label(format!("{} opens it from anywhere (File > Settings to change or turn off).", self.hotkey));
                     let bar_keys: &[(&str, &str)] = &[
-                        ("↑ ↓", "move the selection"),
+                        ("Up / Down", "move the selection"),
                         ("Enter", "open"),
                         ("Ctrl+Enter", "show in folder"),
                         ("Shift+Enter", "show all results in this window"),
@@ -1575,7 +1648,7 @@ impl eframe::App for FileCraftApp {
         if self.background.is_some() {
             quick_bar::register(&ctx, &self.quick_bar);
         }
-        if self.pending.is_none() && self.editor_confirm.is_none() {
+        if self.pending.is_none() && self.editor_confirm.is_none() && !self.close_notice {
             self.handle_keys(&ctx);
         }
         self.poll();
@@ -1599,6 +1672,7 @@ impl eframe::App for FileCraftApp {
         self.help_window(&ctx);
         self.unsaved_modal(&ctx);
         self.editor_confirm_modal(&ctx);
+        self.close_notice_modal(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1621,10 +1695,34 @@ impl eframe::App for FileCraftApp {
         storage.set_string(KEY_QUICK_SEARCH, if self.quick_search { "1" } else { "0" }.into());
         // Not the field's text, which may be half-typed.
         storage.set_string(KEY_HOTKEY, self.hotkey.to_string());
+        storage.set_string(KEY_CLOSE_NOTICE_SHOWN, if self.close_notice_shown { "1" } else { "0" }.into());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Takes the tray icon away now; Windows only notices a dead one when the pointer crosses it.
         self.background = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_notice_comes_once_before_the_first_hide() {
+        assert_eq!(close_step(true, false, false, true), CloseStep::NoticeThenHide);
+        assert_eq!(close_step(true, false, true, true), CloseStep::Hide);
+    }
+
+    #[test]
+    fn exiting_never_stops_for_the_notice() {
+        assert_eq!(close_step(true, true, false, true), CloseStep::Exit);
+        assert_eq!(close_step(false, false, false, true), CloseStep::Exit);
+    }
+
+    /// An outside close of a hidden window must not use up the notice where nobody can see it.
+    #[test]
+    fn a_hidden_window_does_not_use_up_the_notice() {
+        assert_eq!(close_step(true, false, false, false), CloseStep::Hide);
     }
 }
