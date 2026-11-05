@@ -36,6 +36,11 @@ All notable changes to this project are documented here. The format follows
 - CI also runs the tests in the release profile (overflow checks off) and runs every week, so new
   advisories and yanked crates show up between pull requests. Third-party actions are pinned to
   commit SHAs, and Dependabot proposes updates (MIN-04).
+- Quick search bar: a system-wide hotkey (default Alt+Space, configurable in Settings) opens a small
+  always-on-top search box that ranks programs and close name matches first. Enter opens the
+  result, Ctrl+Enter shows it in its folder, Shift+Enter shows all results in the main window.
+- Notification area icon. With quick search on (the default), closing the window keeps FileCraft
+  running there, **Exit** quits, and starting FileCraft again shows the running instance.
 
 ### Changed
 

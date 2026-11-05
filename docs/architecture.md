@@ -10,6 +10,8 @@
 | `src/walk.rs` | Parallel directory walk (fallback, no admin) |
 | `src/indexer.rs` | Drive discovery and background (re)indexing per drive |
 | `src/search.rs` | Query language, parallel filtering, cross-drive merge, background searcher |
+| `src/quick_bar.rs` | The quick search bar: its window, its own searcher, launcher-style ranking of the hits |
+| `src/hotkey.rs` | Hotkey parsing; the background thread with the global hotkey and the tray icon |
 | `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts) |
 | `src/actions.rs` | Shell integration: open, reveal, properties, external editor |
 | `src/util.rs` | FILETIME and size formatting, local-time helpers, verbatim file-system paths (`fs_path`) and detection of names Win32 would rewrite (`win32_alias`) |
@@ -134,3 +136,24 @@ snapshot, so clearing the query is instant.
 `egui`/`eframe` (OpenGL backend). The results table (`egui_extras::TableBuilder`) only lays out
 visible rows, so millions of results scroll smoothly. Selection is remembered by path and restored
 when new results or a new index arrive. Release builds use the Windows GUI subsystem (no console).
+
+## Quick search and running in the background
+
+While the main window is hidden, `eframe` runs no UI for it, only `App::logic`, and only when a
+repaint is requested. So everything that has to continue then (closing, the index snapshots, polling
+the background thread) lives in `logic`, and these two parts work without the window:
+
+- **Background thread** (`hotkey.rs`) — owns a hidden top-level window with the `RegisterHotKey`
+  hotkey and the tray icon, and runs its message loop. On the hotkey it places and shows the bar
+  itself: the process that receives a hotkey may take the foreground, and the bar appears without
+  waiting for the throttled repaint of a hidden main window. The window class also identifies a
+  running instance, which a second start asks to show its window before exiting.
+- **Bar** (`quick_bar.rs`) — a *deferred* viewport, which renders on its own; an immediate one only
+  renders inside its parent's pass, which does not run for a hidden window. Its state is therefore
+  behind a mutex, and it has its own `Searcher`. The main window passes it each new index snapshot.
+  Showing and hiding use Win32 calls rather than viewport commands, so that winit's idea of the
+  window stays consistent. Hiding happens on the bar's own thread (the hotkey thread only signals),
+  because only then does Windows return the foreground to the previous window.
+
+Ranking looks at no more than the first 500,000 hits and keeps the best few, comparing how the name
+matches the first plain search term, then programs and shortcuts, visibility, name length and depth.

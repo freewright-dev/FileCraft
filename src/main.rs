@@ -3,11 +3,13 @@
 
 mod actions;
 mod app;
+mod hotkey;
 mod index;
 mod indexer;
 mod mft;
 mod mft_helper;
 mod preview;
+mod quick_bar;
 mod search;
 mod util;
 mod walk;
@@ -20,6 +22,12 @@ fn main() -> eframe::Result {
     if args.next().is_some_and(|a| a == mft_helper::HELPER_ARG) {
         let pipe = args.next().unwrap_or_default();
         std::process::exit(mft_helper::run_helper(&pipe));
+    }
+
+    // Closing the window keeps FileCraft running in the notification area, so starting it again
+    // means "show me the window".
+    if hotkey::activate_running_instance() {
+        return Ok(());
     }
 
     let options = eframe::NativeOptions {
