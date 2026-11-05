@@ -65,12 +65,34 @@ fn name_tier(lower_name: &str, needle: &str) -> u8 {
     }
 }
 
-/// The first search term that is plain text, which is what names are compared with. Terms with
-/// operators (`ext:pdf`, `*.rs`, `!draft`, `a|b`, `src\main`) filter but do not say what the name is.
-fn plain_term(query: &str) -> String {
+/// Splits a query at the whitespace outside quotes.
+fn terms(query: &str) -> impl Iterator<Item = &str> {
+    let mut in_quotes = false;
     query
-        .split_whitespace()
-        .find(|term| !term.contains([':', '*', '?', '\\', '/', '|', '!', '"']))
+        .split(move |c: char| {
+            if c == '"' {
+                in_quotes = !in_quotes;
+            }
+            c.is_whitespace() && !in_quotes
+        })
+        .filter(|term| !term.is_empty())
+}
+
+/// The first search term that is plain text, which is what names are compared with. Terms with
+/// operators (`ext:pdf`, `*.rs`, `!draft`, `a|b`, `src\main`) filter but do not say what the name
+/// is. A quoted phrase is plain text whatever it holds; with an operator in front
+/// (`!"old copy"`, `folder:"my docs"`) it is not.
+fn plain_term(query: &str) -> String {
+    terms(query)
+        .find_map(|term| {
+            if term.starts_with('"') {
+                Some(term.trim_matches('"'))
+            } else if term.contains([':', '*', '?', '\\', '/', '|', '!', '"']) {
+                None
+            } else {
+                Some(term)
+            }
+        })
         .unwrap_or_default()
         .to_lowercase()
 }
@@ -163,7 +185,10 @@ impl QuickBar {
             ctx,
             index: Index::default(),
             query: String::new(),
-            searcher: Searcher::new(move || repaint.request_repaint_of(viewport_id())),
+            searcher: Searcher::with_ranker(
+                move || repaint.request_repaint_of(viewport_id()),
+                Box::new(|index, hits, text| rank(index, hits, text, MAX_ROWS)),
+            ),
             latest_generation: 0,
             needs_search: false,
             searching: false,
@@ -217,7 +242,7 @@ impl QuickBar {
             self.searching = false;
             self.error = res.error;
             if self.error.is_none() {
-                self.rows = rank(&res.index, &res.hits, &self.query, MAX_ROWS);
+                self.rows = res.top;
                 self.total = res.hits.len();
                 self.selected = 0;
                 self.shown = res.index;
@@ -330,7 +355,9 @@ impl QuickBar {
 
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if self.signals.close.swap(false, Ordering::AcqRel) {
+        // Alt+F4 and the like: eframe leaves closing a secondary window to the viewport's owner.
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if self.signals.close.swap(false, Ordering::AcqRel) || close_requested {
             self.close();
         }
         if self.signals.open.swap(false, Ordering::AcqRel) {
@@ -447,6 +474,25 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn plain_term_reads_quoted_phrases() {
+        assert_eq!(plain_term("\"Visual Studio\" ext:exe"), "visual studio");
+        assert_eq!(plain_term("ext:exe \"Visual Studio\""), "visual studio");
+        // Inside the quotes everything is literal text.
+        assert_eq!(plain_term("\"a:b\""), "a:b");
+        // Still being typed.
+        assert_eq!(plain_term("\"visual stu"), "visual stu");
+    }
+
+    #[test]
+    fn quoted_queries_rank_by_name() {
+        let names = [("my visual studio notes", 0), ("visual studio", 0), ("visual studio.exe", 0)];
+        assert_eq!(
+            ranked(&names, "\"visual studio\"", 10),
+            ["visual studio.exe", "visual studio", "my visual studio notes"]
+        );
+    }
+
+    #[test]
     fn name_tiers_prefer_closer_matches() {
         assert_eq!(name_tier("code", "code"), 0);
         assert_eq!(name_tier("code.exe", "code"), 1);
@@ -462,7 +508,8 @@ mod tests {
     fn plain_term_skips_operators() {
         assert_eq!(plain_term("Report ext:pdf"), "report");
         assert_eq!(plain_term("ext:pdf Report"), "report");
-        assert_eq!(plain_term("!draft *.rs src\\main a|b \"x y\" Notes"), "notes");
+        assert_eq!(plain_term("!draft *.rs src\\main a|b Notes"), "notes");
+        assert_eq!(plain_term("!\"old copy\" folder:\"my docs\" Notes"), "notes");
         assert_eq!(plain_term("ext:pdf"), "");
         assert_eq!(plain_term("  "), "");
     }
