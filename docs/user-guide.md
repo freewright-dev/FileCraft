@@ -2,7 +2,8 @@
 
 FileCraft indexes every file and folder on your fixed drives and finds them as you type,
 like [Everything](https://www.voidtools.com/). Start `FileCraft.exe`; there are no command-line options (FileCraft starts its own NTFS
-helper with an internal one).
+helper with an internal one). When it is already running in the notification area, starting it again
+shows its window.
 
 ## Window
 
@@ -18,6 +19,30 @@ helper with an internal one).
   `…` waiting, `45%` reading the MFT, `1,234,567` entries found by a folder scan so far,
   `✔` ready, `⟳` refreshing in the background, `✖` failed (hover for details). The hover text
   also says how many items a folder scan could not read, and whether the index could not be cached.
+
+## Quick search bar
+
+Press **Alt+Space** anywhere in Windows to open a small search box in the middle of the screen you
+are working on. It takes the same search syntax as the main window, and shows the best eight
+results: names that match what you typed most closely come first, and programs and shortcuts before
+other files. It always searches with the default options (not the **Search** menu's).
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` | Move the selection |
+| `Enter` / click | Open with the default application |
+| `Ctrl+Enter` | Show in Explorer |
+| `Shift+Enter` | Show all results in the main window |
+| `Ctrl+Shift+C` | Copy the full path |
+| `Esc`, the hotkey, or clicking elsewhere | Close the bar |
+
+While quick search is on, FileCraft keeps running in the notification area: closing the window only
+hides it, and the indexes stay in memory. Click the icon or start FileCraft again to bring the
+window back, and right-click the icon or use **File → Exit** to quit.
+FileCraft does not start with Windows by itself, so the hotkey works once you have started it.
+
+Change the hotkey or turn all this off in **Settings**. If another program already uses the hotkey,
+Settings says so.
 
 ## Indexing
 
@@ -135,5 +160,9 @@ external editor, since those would act on a different item.
 - **Re-index on startup when older than** — cache age in minutes, up to 10,080 (one week); 0
   re-indexes on every start.
 - **Delete cached indexes** — removes the cache files; drives are rebuilt on the next re-index.
+- **Quick search** — the hotkey and the notification area icon. Write the hotkey as modifiers and a
+  key, like `Alt+Space` or `Ctrl+Shift+K`; the key is a letter, digit, `F1`–`F24`, `Space`, `Tab`,
+  `Enter`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown` or `` ` ``. Only function keys
+  work without a modifier. Turned off, closing the window exits FileCraft.
 
 Settings, the window size, sort order and search options are remembered between sessions.

@@ -22,6 +22,9 @@ fixed drives and filters millions of entries as you type.
 - **Preview and edit**: text with an inline editor (Ctrl+S to save; encoding and line endings
   kept), images, hex dumps and folder listings.
 - **Shell actions**: open, show in Explorer, Properties, copy path and external editor.
+- **Quick search bar**: press **Alt+Space** anywhere for a small launcher-style search box that
+  ranks programs and close matches first. FileCraft stays in the notification area when its window
+  is closed.
 
 Measured on a machine with 7 drives and 13 million files, without admin rights:
 

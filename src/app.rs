@@ -1,17 +1,19 @@
 //! The desktop UI.
 
 use crate::actions;
+use crate::hotkey::{self, Background, BarSignals, DEFAULT_HOTKEY, Hotkey};
 use crate::index::{ATTR_HIDDEN, ATTR_SYSTEM, Index, SortKey, Source, data_dir};
 use crate::indexer::{Drive, IndexEvent, Indexer, Phase, fixed_drives};
 use crate::mft_helper::MftHelper;
 use crate::preview::{Content, Preview, PreviewLoader, SaveError};
+use crate::quick_bar::{self, QuickBar};
 use crate::search::{Hit, SearchOptions, Searcher, Sort};
 use crate::util::{format_filetime, format_size, fs_path, group_digits, local_offset, win32_alias};
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 const KEY_EDITOR: &str = "editor";
@@ -20,6 +22,8 @@ const KEY_MAX_AGE: &str = "reindex_after_minutes";
 const KEY_PREVIEW: &str = "show_preview";
 const KEY_OPTIONS: &str = "search_options";
 const KEY_SORT: &str = "sort";
+const KEY_QUICK_SEARCH: &str = "quick_search";
+const KEY_HOTKEY: &str = "quick_search_hotkey";
 /// Upper end of the "re-index when older than" setting: one week.
 const MAX_AGE_LIMIT_MINUTES: u64 = 10_080;
 
@@ -82,6 +86,18 @@ pub struct FileCraftApp {
     /// The NTFS helper being started (UAC prompt, connection).
     helper_start: Option<std::sync::mpsc::Receiver<std::io::Result<MftHelper>>>,
     allow_close: bool,
+    /// The user asked to exit, as opposed to closing the window while the tray icon stays.
+    quitting: bool,
+
+    quick_bar: Arc<Mutex<QuickBar>>,
+    bar_signals: Arc<BarSignals>,
+    /// Queries the bar hands over to this window.
+    from_bar: crossbeam_channel::Receiver<String>,
+    /// The hotkey and tray icon. While this exists, closing the window hides it.
+    background: Option<Background>,
+    quick_search: bool,
+    hotkey_text: String,
+    hotkey_error: Option<String>,
 
     editor: String,
     /// Elevated only: the editor command the user agreed to run as administrator this session.
@@ -125,7 +141,13 @@ impl FileCraftApp {
         let included: Vec<Drive> = drives.iter().filter(|d| !excluded.contains(&d.letter)).cloned().collect();
         indexer.start(included, Duration::from_secs(max_age_minutes * 60), false);
 
-        FileCraftApp {
+        let quick_search = get(KEY_QUICK_SEARCH).is_none_or(|s| s == "1");
+        let hotkey_text = get(KEY_HOTKEY).filter(|s| Hotkey::parse(s).is_ok()).unwrap_or_else(|| DEFAULT_HOTKEY.to_string());
+        let bar_signals = Arc::new(BarSignals::default());
+        let (to_main, from_bar) = crossbeam_channel::unbounded();
+        let quick_bar = Arc::new(Mutex::new(QuickBar::new(cc.egui_ctx.clone(), Arc::clone(&bar_signals), to_main)));
+
+        let mut app = FileCraftApp {
             indexer,
             searcher,
             drives,
@@ -155,6 +177,14 @@ impl FileCraftApp {
             saving: None,
             helper_start: None,
             allow_close: false,
+            quitting: false,
+            quick_bar,
+            bar_signals,
+            from_bar,
+            background: None,
+            quick_search,
+            hotkey_text,
+            hotkey_error: None,
             editor,
             editor_confirmed: None,
             editor_confirm: None,
@@ -165,7 +195,105 @@ impl FileCraftApp {
             focus_search: true,
             status: None,
             tz_offset: local_offset(),
+        };
+        if app.quick_search {
+            app.start_background(&cc.egui_ctx);
         }
+        app
+    }
+
+    // ── Quick search and the background window ──
+
+    fn start_background(&mut self, ctx: &egui::Context) {
+        let hotkey = Hotkey::parse(&self.hotkey_text).unwrap_or_else(|_| Hotkey::parse(DEFAULT_HOTKEY).expect("valid default"));
+        match Background::start(hotkey, ctx.clone(), Arc::clone(&self.bar_signals)) {
+            Ok(background) => self.background = Some(background),
+            Err(e) => self.hotkey_error = Some(format!("Quick search is not available: {e}")),
+        }
+    }
+
+    /// Applies the hotkey typed in the settings.
+    fn apply_hotkey_text(&mut self) {
+        match Hotkey::parse(&self.hotkey_text) {
+            Ok(hotkey) => {
+                self.hotkey_text = hotkey.to_string();
+                self.hotkey_error = None;
+                if let Some(background) = &self.background {
+                    background.set_hotkey(hotkey);
+                }
+            }
+            Err(e) => self.hotkey_error = Some(e),
+        }
+    }
+
+    fn show_main(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        self.focus_search = true;
+    }
+
+    /// Exits the program. Unsaved edits need the window, to ask about them.
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        if self.saving.is_some() || self.preview.as_ref().is_some_and(|p| p.dirty) {
+            self.show_main(ctx);
+        }
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+    }
+
+    /// Finishes closing the window, now that no edits stand in the way.
+    fn close_window(&mut self, ctx: &egui::Context) {
+        if self.background.is_some() && !self.quitting {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(false));
+        } else {
+            self.allow_close = true;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+        }
+    }
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        if let Some(saving) = self.saving.as_mut() {
+            // Close once the save in progress has finished.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            saving.then = Some(Pending::Close);
+        } else if self.preview.as_ref().is_some_and(|p| p.dirty) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending = Some(Pending::Close);
+        } else if self.background.is_some() && !self.quitting {
+            // Only the window goes away; the hotkey and the tray icon stay.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_window(ctx);
+        }
+    }
+
+    fn poll_background(&mut self, ctx: &egui::Context) {
+        while let Ok(query) = self.from_bar.try_recv() {
+            self.query = query;
+            self.submit_search();
+            self.show_main(ctx);
+        }
+        let events: Vec<_> = self.background.iter().flat_map(|b| b.events.try_iter()).collect();
+        for event in events {
+            match event {
+                hotkey::Event::ShowMain => self.show_main(ctx),
+                hotkey::Event::Quit => self.quit(ctx),
+                hotkey::Event::HotkeyRegistered(result) => {
+                    if let Err(e) = &result {
+                        self.set_status(e.clone());
+                    }
+                    self.hotkey_error = result.err();
+                }
+            }
+        }
+    }
+
+    /// Tells the bar about a new snapshot of the index.
+    fn publish_index(&self) {
+        self.quick_bar.lock().unwrap().set_index(self.index.clone());
     }
 
     fn set_status(&mut self, msg: impl Into<String>) {
@@ -187,6 +315,7 @@ impl FileCraftApp {
             if !self.excluded.contains(&volume.letter) {
                 self.index = self.index.with_volume(volume);
                 self.needs_search = true;
+                self.publish_index();
             }
         }
 
@@ -454,6 +583,7 @@ impl FileCraftApp {
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.saving = None;
+                self.quitting = false;
                 self.set_status("Save failed: the save thread stopped");
                 return;
             }
@@ -474,17 +604,18 @@ impl FileCraftApp {
                             self.select(row);
                         }
                     }
-                    Some(Pending::Close) => {
-                        self.allow_close = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    Some(Pending::Close) => self.close_window(ctx),
                     None => {}
                 }
             }
             Err(SaveError::Conflict(kind)) => {
+                self.quitting = false;
                 self.set_status(format!("Not saved. {} Choose Overwrite or Reload.", kind.describe()));
             }
-            Err(SaveError::Io(e)) => self.set_status(format!("Save failed: {e}")),
+            Err(SaveError::Io(e)) => {
+                self.quitting = false;
+                self.set_status(format!("Save failed: {e}"));
+            }
         }
     }
 
@@ -612,7 +743,7 @@ impl FileCraftApp {
                 }
                 ui.separator();
                 if ui.button("Exit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.quit(ctx);
                 }
             });
             ui.menu_button("Search", |ui| {
@@ -1049,7 +1180,10 @@ impl FileCraftApp {
                     p.cancel_edit();
                 }
             }
-            _ => return,
+            _ => {
+                self.quitting = false;
+                return;
+            }
         }
         match pending {
             Some(Pending::Select(row)) => {
@@ -1058,10 +1192,7 @@ impl FileCraftApp {
                     self.select(row);
                 }
             }
-            Some(Pending::Close) if closing => {
-                self.allow_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            Some(Pending::Close) if closing => self.close_window(ctx),
             _ => {}
         }
     }
@@ -1110,6 +1241,7 @@ impl FileCraftApp {
         let mut open = self.show_settings;
         let mut changed_drives: Vec<(char, bool)> = Vec::new();
         let mut clear_cache = false;
+        let (mut quick_toggled, mut hotkey_committed) = (false, false);
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
@@ -1143,8 +1275,38 @@ impl FileCraftApp {
                 if ui.button("Delete cached indexes").clicked() {
                     clear_cache = true;
                 }
+                ui.add_space(10.0);
+
+                ui.strong("Quick search");
+                quick_toggled = ui
+                    .checkbox(&mut self.quick_search, "Search from anywhere with a hotkey")
+                    .on_hover_text("Closing the window then keeps FileCraft running in the notification area; use Exit to quit.")
+                    .changed();
+                ui.add_enabled_ui(self.quick_search, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Hotkey");
+                        let resp = ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(140.0));
+                        hotkey_committed = resp.lost_focus();
+                    });
+                });
+                if let Some(err) = &self.hotkey_error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
             });
         self.show_settings = open;
+
+        if quick_toggled {
+            if self.quick_search {
+                self.hotkey_error = None;
+                self.apply_hotkey_text();
+                self.start_background(ctx);
+            } else {
+                self.background = None;
+                self.hotkey_error = None;
+            }
+        } else if hotkey_committed {
+            self.apply_hotkey_text();
+        }
 
         for (letter, on) in changed_drives {
             if on {
@@ -1156,6 +1318,7 @@ impl FileCraftApp {
                 self.excluded.insert(letter);
                 self.indexer.remove(letter);
                 self.index = self.index.without_volume(letter);
+                self.publish_index();
                 self.submit_search();
             }
         }
@@ -1214,6 +1377,24 @@ impl FileCraftApp {
                     ];
                     egui::Grid::new("keys").striped(true).num_columns(2).show(ui, |ui| {
                         for (k, d) in keys {
+                            ui.monospace(*k);
+                            ui.label(*d);
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.strong("Quick search bar");
+                    ui.label(format!("{} opens it from anywhere (File → Settings to change or turn off).", self.hotkey_text));
+                    let bar_keys: &[(&str, &str)] = &[
+                        ("↑ ↓", "move the selection"),
+                        ("Enter", "open"),
+                        ("Ctrl+Enter", "show in folder"),
+                        ("Shift+Enter", "show all results in this window"),
+                        ("Ctrl+Shift+C", "copy full path"),
+                        ("Esc", "close the bar"),
+                    ];
+                    egui::Grid::new("bar-keys").striped(true).num_columns(2).show(ui, |ui| {
+                        for (k, d) in bar_keys {
                             ui.monospace(*k);
                             ui.label(*d);
                             ui.end_row();
@@ -1355,23 +1536,22 @@ fn decode_sort(s: &str) -> Sort {
 }
 
 impl eframe::App for FileCraftApp {
+    /// Also runs while the window is hidden, when `ui` does not: everything that has to keep going
+    /// then (the tray icon, indexing for the bar, closing) belongs here.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_close_request(ctx);
+        self.poll_background(ctx);
+        self.poll();
+        self.poll_save(ctx);
+        self.poll_helper_start();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
-            if let Some(saving) = self.saving.as_mut() {
-                // Close once the save in progress has finished.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                saving.then = Some(Pending::Close);
-            } else if self.preview.as_ref().is_some_and(|p| p.dirty) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.pending = Some(Pending::Close);
-            }
+        if self.background.is_some() {
+            quick_bar::register(&ctx, &self.quick_bar);
         }
-
-        self.poll();
-        self.poll_save(&ctx);
-        self.poll_helper_start();
         if self.pending.is_none() && self.editor_confirm.is_none() {
             self.handle_keys(&ctx);
         }
@@ -1415,5 +1595,15 @@ impl eframe::App for FileCraftApp {
         }
         storage.set_string(KEY_OPTIONS, flags);
         storage.set_string(KEY_SORT, encode_sort(self.sort));
+        storage.set_string(KEY_QUICK_SEARCH, if self.quick_search { "1" } else { "0" }.into());
+        // A half-typed hotkey is not kept: the setting holds the last one that made sense.
+        if Hotkey::parse(&self.hotkey_text).is_ok() {
+            storage.set_string(KEY_HOTKEY, self.hotkey_text.clone());
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Takes the tray icon away now; Windows only notices a dead one when the pointer crosses it.
+        self.background = None;
     }
 }
