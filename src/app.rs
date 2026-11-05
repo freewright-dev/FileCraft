@@ -96,7 +96,10 @@ pub struct FileCraftApp {
     /// The hotkey and tray icon. While this exists, closing the window hides it.
     background: Option<Background>,
     quick_search: bool,
+    /// The hotkey in the settings field, possibly half-typed.
     hotkey_text: String,
+    /// The last valid hotkey that was asked for.
+    hotkey: Hotkey,
     hotkey_error: Option<String>,
 
     editor: String,
@@ -142,7 +145,9 @@ impl FileCraftApp {
         indexer.start(included, Duration::from_secs(max_age_minutes * 60), false);
 
         let quick_search = get(KEY_QUICK_SEARCH).is_none_or(|s| s == "1");
-        let hotkey_text = get(KEY_HOTKEY).filter(|s| Hotkey::parse(s).is_ok()).unwrap_or_else(|| DEFAULT_HOTKEY.to_string());
+        let hotkey = get(KEY_HOTKEY)
+            .and_then(|s| Hotkey::parse(&s).ok())
+            .unwrap_or_else(|| Hotkey::parse(DEFAULT_HOTKEY).expect("the default is valid"));
         let bar_signals = Arc::new(BarSignals::default());
         let (to_main, from_bar) = crossbeam_channel::unbounded();
         let quick_bar = Arc::new(Mutex::new(QuickBar::new(cc.egui_ctx.clone(), Arc::clone(&bar_signals), to_main)));
@@ -183,7 +188,8 @@ impl FileCraftApp {
             from_bar,
             background: None,
             quick_search,
-            hotkey_text,
+            hotkey_text: hotkey.to_string(),
+            hotkey,
             hotkey_error: None,
             editor,
             editor_confirmed: None,
@@ -205,8 +211,7 @@ impl FileCraftApp {
     // ── Quick search and the background window ──
 
     fn start_background(&mut self, ctx: &egui::Context) {
-        let hotkey = Hotkey::parse(&self.hotkey_text).unwrap_or_else(|_| Hotkey::parse(DEFAULT_HOTKEY).expect("valid default"));
-        match Background::start(hotkey, ctx.clone(), Arc::clone(&self.bar_signals)) {
+        match Background::start(self.hotkey, ctx.clone(), Arc::clone(&self.bar_signals)) {
             Ok(background) => self.background = Some(background),
             Err(e) => self.hotkey_error = Some(format!("Quick search is not available: {e}")),
         }
@@ -216,6 +221,7 @@ impl FileCraftApp {
     fn apply_hotkey_text(&mut self) {
         match Hotkey::parse(&self.hotkey_text) {
             Ok(hotkey) => {
+                self.hotkey = hotkey;
                 self.hotkey_text = hotkey.to_string();
                 self.hotkey_error = None;
                 if let Some(background) = &self.background {
@@ -272,12 +278,24 @@ impl FileCraftApp {
 
     fn poll_background(&mut self, ctx: &egui::Context) {
         while let Ok(query) = self.from_bar.try_recv() {
+            // The bar searches with the default options, so this shows the same results.
+            self.options = SearchOptions::default();
             self.query = query;
             self.submit_search();
             self.show_main(ctx);
         }
-        let events: Vec<_> = self.background.iter().flat_map(|b| b.events.try_iter()).collect();
-        for event in events {
+        while let Some(background) = &self.background {
+            let event = match background.events.try_recv() {
+                Ok(event) => event,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    // No tray icon or hotkey is left to bring a hidden window back.
+                    self.background = None;
+                    self.hotkey_error = Some("Quick search stopped unexpectedly. Turn it off and on to restart it.".into());
+                    self.show_main(ctx);
+                    break;
+                }
+            };
             match event {
                 hotkey::Event::ShowMain => self.show_main(ctx),
                 hotkey::Event::Quit => self.quit(ctx),
@@ -1297,8 +1315,13 @@ impl FileCraftApp {
 
         if quick_toggled {
             if self.quick_search {
+                // A half-typed hotkey gives way to the one that will actually be registered, so
+                // the field never shows something other than what is in effect.
+                if let Ok(hotkey) = Hotkey::parse(&self.hotkey_text) {
+                    self.hotkey = hotkey;
+                }
+                self.hotkey_text = self.hotkey.to_string();
                 self.hotkey_error = None;
-                self.apply_hotkey_text();
                 self.start_background(ctx);
             } else {
                 self.background = None;
@@ -1596,10 +1619,8 @@ impl eframe::App for FileCraftApp {
         storage.set_string(KEY_OPTIONS, flags);
         storage.set_string(KEY_SORT, encode_sort(self.sort));
         storage.set_string(KEY_QUICK_SEARCH, if self.quick_search { "1" } else { "0" }.into());
-        // A half-typed hotkey is not kept: the setting holds the last one that made sense.
-        if Hotkey::parse(&self.hotkey_text).is_ok() {
-            storage.set_string(KEY_HOTKEY, self.hotkey_text.clone());
-        }
+        // Not the field's text, which may be half-typed.
+        storage.set_string(KEY_HOTKEY, self.hotkey.to_string());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

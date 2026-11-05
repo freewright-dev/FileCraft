@@ -162,22 +162,24 @@ mod platform {
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey};
     use windows_sys::Win32::UI::Shell::{
-        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+        NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4,
+        NOTIFYICONDATAW, Shell_NotifyIconW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AllowSetForegroundWindow, AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-        DestroyMenu, DispatchMessageW, FindWindowExW, FindWindowW, GetCursorPos, GetForegroundWindow,
-        GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, IMAGE_ICON, IsWindowVisible,
-        LoadImageW, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
-        SM_CYSMICON, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-        ShowWindow, TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_HOTKEY,
-        WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+        AllowSetForegroundWindow, AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
+        DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GetCursorPos,
+        GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, IMAGE_ICON,
+        IsWindowVisible, LoadImageW, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
+        RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, ShowWindowAsync, TPM_RETURNCMD, TrackPopupMenu,
+        TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_NULL, WNDCLASSW, WS_OVERLAPPED,
     };
 
     const CLASS_NAME: &str = "FileCraftBackgroundWindow";
@@ -186,6 +188,14 @@ mod platform {
     const WM_TRAY: u32 = WM_APP + 1;
     const WM_SET_HOTKEY: u32 = WM_APP + 2;
     const WM_SHOW_MAIN: u32 = WM_APP + 3;
+    /// As in `shellapi.h`; `windows-sys` has only its two parts.
+    const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
+    /// `Background::drop`'s request to end the thread. It is not WM_CLOSE, which anyone can send:
+    /// `taskkill` sends that to every top-level window, and it means "exit the program".
+    const WM_SHUTDOWN: u32 = WM_APP + 4;
+    /// How long dropping `Background` waits for the thread to remove the tray icon. The main thread
+    /// handles no messages meanwhile, and a thread blocked on one of its windows would never finish.
+    const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
     const MENU_OPEN: usize = 1;
     const MENU_SEARCH: usize = 2;
     const MENU_EXIT: usize = 3;
@@ -243,6 +253,9 @@ mod platform {
 
         fn toggle_bar(&self) {
             let Some(bar) = find_bar() else { return };
+            // The main thread owns the bar, so everything here is asynchronous: a synchronous call
+            // would wait for that thread to handle its messages, stalling this one while the UI is
+            // busy. The requests are queued in order, so the window is placed before it shows.
             // SAFETY: plain Win32 calls on a window of this process; a window that has just been
             // destroyed only makes them fail.
             unsafe {
@@ -252,7 +265,7 @@ mod platform {
                     place_bar(bar);
                     // Before showing it, so the first frame the bar paints starts afresh.
                     self.signals.open.store(true, Ordering::Release);
-                    ShowWindow(bar, SW_SHOW);
+                    ShowWindowAsync(bar, SW_SHOWNORMAL);
                     SetForegroundWindow(bar);
                 }
             }
@@ -312,7 +325,8 @@ mod platform {
             let work = info.rcWork;
             let x = work.left + ((work.right - work.left) - (rect.right - rect.left)) / 2;
             let y = work.top + (work.bottom - work.top) / 5;
-            SetWindowPos(bar, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+            SetWindowPos(bar, std::ptr::null_mut(), x, y, 0, 0, flags);
         }
     }
 
@@ -334,10 +348,13 @@ mod platform {
         for (slot, unit) in data.szTip.iter_mut().zip("FileCraft".encode_utf16()) {
             *slot = unit;
         }
-        // SAFETY: `data` is fully initialized for the flags it sets. Without a taskbar the call
-        // fails; the icon is added again when the taskbar announces itself.
+        // SAFETY: `data` is fully initialized for the flags it sets, and the version is the union
+        // field NIM_SETVERSION reads. Without a taskbar the calls fail; the icon is added again when
+        // the taskbar announces itself. Version 4 is what reports the keyboard's selections.
         unsafe {
             Shell_NotifyIconW(NIM_ADD, &data);
+            data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &data);
         }
     }
 
@@ -385,10 +402,18 @@ mod platform {
         with_state(|state| taskbar_created = state.taskbar_created);
         match msg {
             WM_HOTKEY => with_state(|state| state.toggle_bar()),
-            WM_TRAY => match lparam as u32 {
-                WM_LBUTTONUP => with_state(|state| state.send(Event::ShowMain)),
-                WM_RBUTTONUP => tray_menu(hwnd),
+            // With icon version 4, the low word of `lparam` is the event.
+            WM_TRAY => match lparam as u32 & 0xFFFF {
+                NIN_SELECT | NIN_KEYSELECT => with_state(|state| state.send(Event::ShowMain)),
+                WM_CONTEXTMENU => tray_menu(hwnd),
                 _ => {}
+            },
+            // From outside, such as `taskkill`: exit properly, rather than losing this window and
+            // leaving a process nobody can reach.
+            WM_CLOSE => with_state(|state| state.send(Event::Quit)),
+            // SAFETY: `hwnd` is this thread's own window.
+            WM_SHUTDOWN => unsafe {
+                DestroyWindow(hwnd);
             },
             WM_SET_HOTKEY => with_state(|state| {
                 let next = state.next_hotkey.lock().unwrap().take();
@@ -443,7 +468,16 @@ mod platform {
                 std::ptr::null(),
             )
         };
-        if hwnd.is_null() { Err(io::Error::last_os_error()) } else { Ok(hwnd) }
+        if hwnd.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // Lets a second start reach an instance running as administrator. This one message only
+        // shows the window; Windows blocks the others from programs with fewer rights.
+        // SAFETY: `hwnd` is the window just created; the extra-information pointer may be null.
+        unsafe {
+            ChangeWindowMessageFilterEx(hwnd, WM_SHOW_MAIN, MSGFLT_ALLOW, std::ptr::null_mut());
+        }
+        Ok(hwnd)
     }
 
     /// The background window and its thread. Dropping it removes the hotkey and the tray icon.
@@ -452,8 +486,9 @@ mod platform {
         /// may call, also with a window that no longer exists.
         hwnd: isize,
         next_hotkey: Arc<Mutex<Option<Hotkey>>>,
+        /// Disconnects if the thread ever ends without being asked to.
         pub events: Receiver<Event>,
-        thread: Option<std::thread::JoinHandle<()>>,
+        stopped: std::sync::mpsc::Receiver<()>,
     }
 
     impl Background {
@@ -462,7 +497,8 @@ mod platform {
             let next_hotkey = Arc::new(Mutex::new(None));
             let next_hotkey_thread = Arc::clone(&next_hotkey);
             let (started_tx, started) = std::sync::mpsc::channel();
-            let thread = std::thread::Builder::new().name("hotkey and tray".into()).spawn(move || {
+            let (stopped_tx, stopped) = std::sync::mpsc::channel();
+            std::thread::Builder::new().name("hotkey and tray".into()).spawn(move || {
                 let hwnd = match create_window() {
                     Ok(hwnd) => hwnd,
                     Err(e) => {
@@ -496,9 +532,10 @@ mod platform {
                     }
                 }
                 STATE.set(None);
+                let _ = stopped_tx.send(());
             })?;
             let hwnd = started.recv().map_err(|_| io::Error::other("the hotkey thread stopped"))??;
-            Ok(Background { hwnd, next_hotkey, events, thread: Some(thread) })
+            Ok(Background { hwnd, next_hotkey, events, stopped })
         }
 
         /// Replaces the hotkey. The outcome arrives as `Event::HotkeyRegistered`.
@@ -513,14 +550,11 @@ mod platform {
 
     impl Drop for Background {
         fn drop(&mut self) {
-            // WM_CLOSE reaches `DefWindowProcW`, which destroys the window on its own thread.
             // SAFETY: posting to a window that no longer exists fails harmlessly.
             unsafe {
-                PostMessageW(self.hwnd as HWND, WM_CLOSE, 0, 0);
+                PostMessageW(self.hwnd as HWND, WM_SHUTDOWN, 0, 0);
             }
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
+            let _ = self.stopped.recv_timeout(SHUTDOWN_WAIT);
         }
     }
 

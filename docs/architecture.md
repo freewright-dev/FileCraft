@@ -155,5 +155,13 @@ the background thread) lives in `logic`, and these two parts work without the wi
   window stays consistent. Hiding happens on the bar's own thread (the hotkey thread only signals),
   because only then does Windows return the foreground to the previous window.
 
-Ranking looks at no more than the first 500,000 hits and keeps the best few, comparing how the name
-matches the first plain search term, then programs and shortcuts, visibility, name length and depth.
+Calls the hotkey thread makes on the bar are asynchronous (`ShowWindowAsync`, `SWP_ASYNCWINDOWPOS`),
+because the main thread owns that window and a synchronous call would wait for it. For the same
+reason, dropping `Background` waits for the thread only briefly: the main thread handles no messages
+meanwhile. `WM_CLOSE` to the hidden window comes from outside (`taskkill` sends it to every top-level
+window), so it means "exit" and goes through the usual unsaved-edits question; the app stops the
+thread with a private message instead.
+
+Ranking runs on the bar searcher's thread. It looks at no more than the first 500,000 hits and keeps
+the best few, comparing how the name matches the first plain search term or quoted phrase, then
+programs and shortcuts, visibility, name length and depth.

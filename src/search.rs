@@ -664,9 +664,14 @@ pub struct Response {
     /// The snapshot the hits refer to.
     pub index: Index,
     pub hits: Arc<Vec<Hit>>,
+    /// What the searcher's ranker picked from the hits; empty without a ranker.
+    pub top: Vec<Hit>,
     pub error: Option<String>,
     pub elapsed: Duration,
 }
+
+/// Picks the hits worth showing, given the snapshot, the hits and the query text.
+pub type Ranker = Box<dyn Fn(&Index, &[Hit], &str) -> Vec<Hit> + Send>;
 
 /// Unfiltered result lists, one per sort order, for the snapshot they were computed on. The
 /// snapshot's volumes are held, not just their addresses: once a volume is freed its address can
@@ -706,6 +711,16 @@ pub struct Searcher {
 
 impl Searcher {
     pub fn new(on_result: impl Fn() + Send + 'static) -> Self {
+        Self::start(on_result, None)
+    }
+
+    /// A searcher that also ranks each result on its own thread, so ranking a long list of hits
+    /// never holds up the UI.
+    pub fn with_ranker(on_result: impl Fn() + Send + 'static, ranker: Ranker) -> Self {
+        Self::start(on_result, Some(ranker))
+    }
+
+    fn start(on_result: impl Fn() + Send + 'static, ranker: Option<Ranker>) -> Self {
         let (tx, rx) = unbounded::<Request>();
         let (res_tx, res_rx) = unbounded::<Response>();
         let latest = Arc::new(AtomicU64::new(0));
@@ -744,10 +759,15 @@ impl Searcher {
                         },
                         Err(e) => (Arc::new(Vec::new()), Some(e)),
                     };
+                    if cancelled() {
+                        continue;
+                    }
+                    let top = ranker.as_ref().map_or_else(Vec::new, |rank| rank(&req.index, &hits, &req.text));
                     let response = Response {
                         generation,
                         index: req.index,
                         hits,
+                        top,
                         error,
                         elapsed: start.elapsed(),
                     };
@@ -776,6 +796,33 @@ mod tests {
     use super::*;
     use crate::index::tests::sample;
     use crate::index::{ATTR_DIRECTORY, Source, VolumeBuilder};
+
+    #[test]
+    fn a_ranker_runs_on_the_search_thread() {
+        let test_thread = std::thread::current().id();
+        let ranker: Ranker = Box::new(move |_, hits, text| {
+            assert_ne!(std::thread::current().id(), test_thread);
+            assert_eq!(text, "main");
+            hits.to_vec()
+        });
+        let mut searcher = Searcher::with_ranker(|| {}, ranker);
+        let index = Index::default().with_volume(Arc::new(sample()));
+        let generation = searcher.submit(index, "main", SearchOptions::default(), Sort::default());
+        let res = searcher.results.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(res.generation, generation);
+        assert_eq!(res.hits.len(), 1);
+        assert_eq!(res.top, *res.hits);
+    }
+
+    #[test]
+    fn without_a_ranker_nothing_is_ranked() {
+        let mut searcher = Searcher::new(|| {});
+        let index = Index::default().with_volume(Arc::new(sample()));
+        searcher.submit(index, "main", SearchOptions::default(), Sort::default());
+        let res = searcher.results.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(res.hits.len(), 1);
+        assert!(res.top.is_empty());
+    }
 
     /// A chain of `depth` folders with one file in each, names varying so name order is mixed.
     fn chain(depth: u32) -> VolumeIndex {
