@@ -40,7 +40,8 @@ All notable changes to this project are documented here. The format follows
   always-on-top search box that ranks programs and close name matches first. Enter opens the
   result, Ctrl+Enter shows it in its folder, Shift+Enter shows all results in the main window.
 - Notification area icon. With quick search on (the default), closing the window keeps FileCraft
-  running there, **Exit** quits, and starting FileCraft again shows the running instance.
+  running there, **Exit** quits, and starting FileCraft again shows the running instance. The first
+  close explains this once and offers to exit instead.
 
 ### Fixed
 

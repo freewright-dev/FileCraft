@@ -39,7 +39,8 @@ other files. It always searches with the default options (not the **Search** men
 
 While quick search is on, FileCraft keeps running in the notification area: closing the window only
 hides it, and the indexes stay in memory. Click the icon or start FileCraft again to bring the
-window back, and right-click the icon or use **File → Exit** to quit.
+window back, and right-click the icon or use **File → Exit** to quit. The first time you close the
+window, FileCraft says this once and offers to exit instead.
 FileCraft does not start with Windows by itself, so the hotkey works once you have started it.
 
 Change the hotkey or turn all this off in **Settings**. If another program already uses the hotkey,
