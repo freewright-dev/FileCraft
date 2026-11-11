@@ -84,7 +84,7 @@ Terms separated by spaces must all match. Matching is case-insensitive unless **
 | `*.rs`, `a?c` | wildcards, matched against the whole name |
 | `src\main`, `c:/users/` | a term with `\` or `/` matches the full path |
 | `ext:pdf;docx` | files with these extensions |
-| `file:` / `folder:` | only files / only folders; `folder:src` = folders containing `src` |
+| `file:` / `folder:` | only files / only folders; `folder:src` = folders containing `src`, `!folder:src` = everything else |
 | `size:>100mb` | file size; also `>=`, `<`, `<=`, `size:1mb..10mb`, `size:empty` |
 | `dm:today` | modified today; also `yesterday`, `30min`, `24h`, `7d`, `2w`, `1y` |
 | `dm:2026-01-31` | modified that day; also `dm:>2026-01-01`, `dm:<2026-01-01`, `dm:2026-01-01..2026-02-01` |
