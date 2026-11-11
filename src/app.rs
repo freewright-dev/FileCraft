@@ -1071,7 +1071,7 @@ impl FileCraftApp {
                 {
                     self.start_fast_indexing(ctx);
                 }
-                let statuses: Vec<_> = self.indexer.status.lock().unwrap().values().cloned().collect();
+                let statuses: Vec<_> = self.indexer.status.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
                 for s in statuses.iter().rev() {
                     drive_chip(ui, s);
                 }

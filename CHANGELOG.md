@@ -166,6 +166,9 @@ All notable changes to this project are documented here. The format follows
   could never be sent, and FileCraft started as administrator closed instead of scanning folders.
   Release builds now unwind: the helper reports the failure and keeps serving, and FileCraft
   reading the table itself falls back to the folder scan for that drive.
+- A panic in one drive's indexing job no longer takes the window down with it. The job held the
+  shared drive-status lock while it failed, and the status bar's next read of that lock panicked
+  the UI thread; reads now recover the status as it was.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
