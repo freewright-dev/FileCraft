@@ -13,7 +13,6 @@ use crate::util::{group_digits, win32_alias};
 use crossbeam_channel::Sender;
 use eframe::egui::{self, Align2, FontId, Key, Modifiers, RichText};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// The title identifies the window to `hotkey::platform`, which shows and hides it.
@@ -229,13 +228,20 @@ impl QuickBar {
         self.latest_generation = 0;
     }
 
-    fn close(&mut self) {
+    /// Hides the bar and forgets the search.
+    fn hide(&mut self) {
         hotkey::hide_bar();
         self.is_open = false;
         self.take_foreground = false;
         self.query.clear();
         self.needs_search = false;
         self.clear_results();
+    }
+
+    /// The bar closes itself: the next hotkey press opens it again.
+    fn close(&mut self) {
+        self.signals.closed();
+        self.hide();
     }
 
     fn poll(&mut self) {
@@ -361,10 +367,18 @@ impl QuickBar {
         let ctx = ui.ctx().clone();
         // Alt+F4 and the like: eframe leaves closing a secondary window to the viewport's owner.
         let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if self.signals.close.swap(false, Ordering::AcqRel) || close_requested {
+        let request = self.signals.take();
+        if close_requested {
             self.close();
+        } else if request.close {
+            // The hotkey has already marked the bar closed, and may have reopened it since.
+            self.hide();
         }
-        if self.signals.open.swap(false, Ordering::AcqRel) {
+        if request.open {
+            if request.close || close_requested {
+                // Queued after the hide just queued, which would otherwise undo the hotkey's show.
+                hotkey::show_bar();
+            }
             self.is_open = true;
             self.focus_input = true;
             self.take_foreground = true;

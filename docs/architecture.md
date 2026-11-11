@@ -165,9 +165,10 @@ the background thread) lives in `logic`, and these two parts work without the wi
 Calls the hotkey thread makes on the bar are asynchronous (`ShowWindowAsync`, `SWP_ASYNCWINDOWPOS`),
 because the main thread owns that window and a synchronous call would wait for it. For the same
 reason, dropping `Background` waits for the thread only briefly: the main thread handles no messages
-meanwhile. `WM_CLOSE` to the hidden window comes from outside (`taskkill` sends it to every top-level
-window), so it means "exit" and goes through the usual unsaved-edits question; the app stops the
-thread with a private message instead.
+meanwhile. Since the window's visibility lags behind these calls, the hotkey toggles whether the bar
+is meant to be open, kept in `BarSignals`, instead of reading it. `WM_CLOSE` to the hidden window
+comes from outside (`taskkill` sends it to every top-level window), so it means "exit" and goes
+through the usual unsaved-edits question; the app stops the thread with a private message instead.
 
 Ranking runs on the bar searcher's thread. It looks at no more than the first 500,000 hits and keeps
 the best few, comparing how the name matches the first plain search term or quoted phrase, then
