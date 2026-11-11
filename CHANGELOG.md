@@ -141,6 +141,9 @@ All notable changes to this project are documented here. The format follows
   replaced by a different file or deleted, and what Overwrite will do. Before, it said only
   "changed or was deleted", so Overwrite could write into a file that had replaced the original
   without saying so (MIN-04).
+- Starting FileCraft or turning quick search on no longer freezes the window while Explorer is
+  slow to add the notification area icon, for example while the taskbar restarts. The background
+  thread now reports that it has started before it adds the icon, instead of after.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
