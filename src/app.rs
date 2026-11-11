@@ -751,11 +751,22 @@ impl FileCraftApp {
             }
         };
         let then = self.saving.take().and_then(|s| s.then);
-        let Some(p) = self.preview.as_mut() else { return };
-        let name = p.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        match p.finish_save(done) {
+        let file_name = |path: &std::path::Path| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (name, result, dirty) = match self.preview.as_mut() {
+            Some(p) => {
+                let name = file_name(&p.path);
+                let result = p.finish_save(done);
+                (name, result, p.dirty)
+            }
+            // The preview went away while saving. The save still happened (or failed), and
+            // whatever waited for it still has to go on.
+            None => {
+                let (path, result) = done.into_outcome();
+                (file_name(&path), result, false)
+            }
+        };
+        match result {
             Ok(()) => {
-                let dirty = p.dirty;
                 self.set_status(format!("Saved {name}"));
                 match then {
                     // Typed while saving: ask again rather than drop those edits.
@@ -772,7 +783,8 @@ impl FileCraftApp {
             }
             Err(SaveError::Conflict(kind)) => {
                 self.quitting = false;
-                self.set_status(format!("Not saved. {} Choose Overwrite or Reload.", kind.describe()));
+                let choose = if self.preview.is_some() { " Choose Overwrite or Reload." } else { "" };
+                self.set_status(format!("Not saved. {}{choose}", kind.describe()));
             }
             Err(SaveError::Io(e)) => {
                 self.quitting = false;
