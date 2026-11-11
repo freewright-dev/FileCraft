@@ -100,8 +100,8 @@ before the index is used:
 - the drive letter matches the drive being loaded;
 - the source byte and build timestamp are valid;
 - every name range lies inside its arena on character boundaries, and every linked entry's name
-  is one path component (not empty, `.` or `..`, no `\`, `/` or NUL; the NTFS reader stores `?`
-  for names that are not);
+  is one path component (not empty, `.` or `..`, no `\`, `/`, `:` or NUL; the NTFS reader and
+  the folder scan store `?` for names that are not);
 - parent ids are in range, entry 0 is a root folder, and every entry with a parent reaches
   the root through its parent links (no loops, no unused slot along the way), so full paths are
   always rebuilt completely, at any depth;

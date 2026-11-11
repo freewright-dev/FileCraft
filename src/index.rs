@@ -297,8 +297,11 @@ impl VolumeBuilder {
         (self.entries.len() - 1) as u32
     }
 
-    /// Stores an entry at a pre-assigned id, growing the table as needed.
+    /// Stores an entry at a pre-assigned id, growing the table as needed. A name that is not one
+    /// path component (see [`valid_name`]) is stored as `?`, as the NTFS reader does, so the
+    /// saved cache stays loadable.
     pub fn set(&mut self, idx: u32, name: &str, parent: u32, attrs: u32, size: u64, mtime: i64) {
+        let name = if valid_name(name) { name } else { "?" };
         let e = self.make_entry(name, parent, attrs, size, mtime);
         let idx = idx as usize;
         if idx >= self.entries.len() {
@@ -378,11 +381,12 @@ impl VolumeBuilder {
     }
 }
 
-/// Whether `name` can be one component of a path: not empty, `.` or `..`, and without a separator
-/// or NUL. The folder scan never lists anything else, and the NTFS reader substitutes such names.
-/// A cache holding one would make a displayed name stand for a different path (FC-17).
+/// Whether `name` can be one component of a path: not empty, `.` or `..`, and without a separator,
+/// `:` or NUL. The folder scan never lists anything else, and the NTFS reader substitutes such
+/// names. A cache holding one would make a displayed name stand for a different path (FC-17):
+/// `x:y` in a folder names the stream `y` of the sibling file `x`, even through a `\\?\` path.
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['\\', '/', '\0'])
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['\\', '/', ':', '\0'])
 }
 
 /// The `len` bytes at `off` in a name arena, if they lie inside it on character boundaries.
@@ -1174,20 +1178,25 @@ pub mod tests {
             ("empty", ""),
             ("slash", "a/b"),
             ("nul", "a\0b"),
+            ("stream", "notes.txt:payload"),
         ] {
             let mut b = VolumeBuilder::new('C');
             let dir = b.push("Public", 0, ATTR_DIRECTORY, 0, 0);
             b.push(bad, dir, 0, 1, 0);
             load_error(&format!("name-{label}"), &cache_bytes(&b.finish(Source::Walk, Duration::ZERO)), 'C');
         }
-        // Names that are odd but valid on NTFS still load.
+        // Names that are odd but valid on NTFS still load. The folder scan stores a name that is
+        // not a path component as `?`, so its caches load too.
         let mut b = VolumeBuilder::new('C');
         b.push("...x", 0, 0, 1, 0);
         b.push("a\"b?", 0, 0, 1, 0);
+        b.set(3, "notes.txt:payload", 0, 0, 1, 0);
         let v = b.finish(Source::Walk, Duration::ZERO);
         let path = cache_dir("odd-names").join("C.idx");
         v.save(&path).unwrap();
-        assert_eq!(VolumeIndex::load(&path, 'C').unwrap().len(), 2);
+        let loaded = VolumeIndex::load(&path, 'C').unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.name(3), "?");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
