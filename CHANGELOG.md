@@ -161,6 +161,8 @@ All notable changes to this project are documented here. The format follows
 - With results sorted by name, keeping the selected item selected when new results arrive no
   longer checks every result: it looks only at the results with the same name. Clearing the query
   on a large index used to compare the name of every entry.
+- The taskbar icon loaded at startup is now a shared system icon, so its handle is no longer
+  leaked for the life of the process.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

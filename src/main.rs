@@ -66,7 +66,7 @@ fn set_taskbar_icon(cc: &eframe::CreationContext<'_>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, ICON_BIG, IMAGE_ICON, LoadImageW, SM_CXICON, SM_CYICON, SendMessageW, WM_SETICON,
+        GetSystemMetrics, ICON_BIG, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON, SM_CYICON, SendMessageW, WM_SETICON,
     };
 
     let Ok(handle) = cc.window_handle() else { return };
@@ -74,7 +74,11 @@ fn set_taskbar_icon(cc: &eframe::CreationContext<'_>) {
     // SAFETY: plain Win32 calls on our own window; resource id 1 is the app icon (winresource's default).
     unsafe {
         let size = (GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
-        let icon = LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as _, IMAGE_ICON, size.0, size.1, 0);
+        // Shared: the system owns the handle and frees it with the module, so it is never leaked
+        // and must not be destroyed. The big icon WM_SETICON replaces is not ours to destroy:
+        // nothing has set one yet (winit sets only the small icon, eframe its own icons later), and
+        // winit destroys the icons it creates itself.
+        let icon = LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as _, IMAGE_ICON, size.0, size.1, LR_SHARED);
         if !icon.is_null() {
             SendMessageW(win.hwnd.get() as _, WM_SETICON, ICON_BIG as usize, icon as isize);
         }
