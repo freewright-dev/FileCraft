@@ -11,8 +11,9 @@ const FIRST_USER_RECORD: usize = 16;
 const READ_CHUNK: usize = 4 << 20;
 /// Fixed FILE record header (through the record number at 0x2C); shorter records are rejected.
 const RECORD_HEADER_LEN: usize = 0x30;
-/// Most $MFT records read (about 2.5 GB of record state). Bigger volumes fall back to the
-/// folder scan instead of allocating without a bound.
+/// Most $MFT records read (up to about 3.7 GB of record state and names). Bigger volumes fall
+/// back to the folder scan instead of allocating without a bound; so does a volume whose
+/// record state cannot be allocated ([`record_state`]).
 const MAX_MFT_RECORDS: u64 = 64 << 20;
 
 const ATTR_STANDARD_INFORMATION: u32 = 0x10;
@@ -100,8 +101,7 @@ pub fn read_volume(
     }
     let record_count = record_count as usize;
     total.store(record_count, Ordering::Relaxed);
-    let mut recs = vec![Rec::default(); record_count];
-    let mut names = String::with_capacity(record_count * 16);
+    let (mut recs, mut names) = record_state(record_count)?;
     let mut links = Vec::new();
     let mut read = |offset: u64, buf: &mut [u8]| read_exact_at(&volume, buf, offset);
     read_records(&runs, cluster, record_size, &mut recs, &mut names, &mut links, progress, cancel, &mut read)?;
@@ -112,6 +112,25 @@ pub fn read_volume(
 #[cfg(not(windows))]
 pub fn read_volume(_: char, _: &AtomicUsize, _: &AtomicUsize, _: &AtomicBool) -> anyhow::Result<VolumeIndex> {
     anyhow::bail!("MFT indexing is only available on Windows")
+}
+
+/// `n` copies of `value`, or an error instead of aborting when the memory is not available.
+fn try_filled<T: Clone>(n: usize, value: T) -> anyhow::Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| anyhow::anyhow!("not enough memory to read the $MFT"))?;
+    v.resize(n, value);
+    Ok(v)
+}
+
+/// The per-record state and the name arena for `record_count` records. Allocated fallibly: a
+/// table too big for the memory available fails, and the folder scan runs instead.
+fn record_state(record_count: usize) -> anyhow::Result<(Vec<Rec>, String)> {
+    let recs = try_filled(record_count, Rec::default())?;
+    let mut names = String::new();
+    names
+        .try_reserve(record_count.saturating_mul(16))
+        .map_err(|_| anyhow::anyhow!("not enough memory to read the $MFT"))?;
+    Ok((recs, names))
 }
 
 /// Parses records `0..recs.len()` of $MFT, stored in `runs` and read through `read` (volume
@@ -587,7 +606,7 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
     const VISITING: u8 = 3;
 
     let n = recs.len();
-    let mut state = vec![UNKNOWN; n];
+    let mut state = try_filled(n, UNKNOWN)?;
     if ROOT_RECORD < n {
         state[ROOT_RECORD] = VALID;
     }
@@ -613,7 +632,7 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
         }
     }
 
-    let mut ids = vec![NONE; n];
+    let mut ids = try_filled(n, NONE)?;
     if ROOT_RECORD < n {
         ids[ROOT_RECORD] = 0;
     }
@@ -908,6 +927,17 @@ mod tests {
         let mut recs = vec![Rec::default(); 4];
         parse_record(&mut short, 1, &mut recs, &mut String::new(), &mut Vec::new());
         assert!(!recs[1].in_use);
+    }
+
+    /// Record state that cannot be allocated is an error, so the folder scan runs. It was
+    /// allocated infallibly, and up to about 3.7 GB below the record cap, so a machine short of
+    /// memory aborted instead.
+    #[test]
+    fn record_state_that_does_not_fit_is_an_error() {
+        assert!(record_state(1 << 40).is_err());
+        let (recs, names) = record_state(100).unwrap();
+        assert_eq!(recs.len(), 100);
+        assert!(names.capacity() >= 1600);
     }
 
     #[test]

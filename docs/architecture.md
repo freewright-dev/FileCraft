@@ -47,7 +47,7 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   NTFS metadata files and anything under `$Extend`. Bad input fails closed and falls back to the
   walk:
   - geometry that is incomplete or inconsistent with the volume size;
-  - more than 64 Mi records;
+  - more than 64 Mi records, or record state (about 56 bytes per record) that cannot be allocated;
   - a data run that is empty, has a negative or overflowing LCN, or ends past the volume, or a
     sparse run longer than the volume;
   - runs that hold fewer records than `MftValidDataLength` implies.
