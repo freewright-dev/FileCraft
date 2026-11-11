@@ -144,6 +144,9 @@ All notable changes to this project are documented here. The format follows
 - Starting FileCraft or turning quick search on no longer freezes the window while Explorer is
   slow to add the notification area icon, for example while the taskbar restarts. The background
   thread now reports that it has started before it adds the icon, instead of after.
+- When the quick search background thread ends unexpectedly while the window is hidden, FileCraft
+  wakes up to bring the window back and say so. It used to depend on eframe happening to run the
+  app's logic for a hidden window, so it could stay unreachable with no tray icon or hotkey.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
