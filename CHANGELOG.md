@@ -147,6 +147,8 @@ All notable changes to this project are documented here. The format follows
 - The searcher no longer keeps an unfiltered result list for every sort order clicked (up to
   eight, about 320 MB on a 5-million-entry index). It keeps the last two, enough to flip a column
   between ascending and descending.
+- If the search thread has stopped (after a crash in it), a search now reports "Searching stopped
+  working. Restart FileCraft." instead of showing a spinner that never ends.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

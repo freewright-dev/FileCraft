@@ -758,6 +758,8 @@ impl EverythingCache {
 pub struct Searcher {
     tx: Sender<Request>,
     pub results: Receiver<Response>,
+    /// Answers requests the search thread can no longer take.
+    failed: Sender<Response>,
     latest: Arc<AtomicU64>,
     next_generation: u64,
 }
@@ -776,6 +778,7 @@ impl Searcher {
     fn start(on_result: impl Fn() + Send + 'static, ranker: Option<Ranker>) -> Self {
         let (tx, rx) = unbounded::<Request>();
         let (res_tx, res_rx) = unbounded::<Response>();
+        let res_tx_failed = res_tx.clone();
         let latest = Arc::new(AtomicU64::new(0));
         let latest_bg = Arc::clone(&latest);
 
@@ -832,14 +835,25 @@ impl Searcher {
             })
             .expect("spawn search thread");
 
-        Searcher { tx, results: res_rx, latest, next_generation: 0 }
+        Searcher { tx, results: res_rx, failed: res_tx_failed, latest, next_generation: 0 }
     }
 
     pub fn submit(&mut self, index: Index, text: &str, options: SearchOptions, sort: Sort) -> u64 {
         self.next_generation += 1;
         let generation = self.next_generation;
         self.latest.store(generation, AtomicOrdering::Relaxed);
-        let _ = self.tx.send(Request { generation, index, text: text.to_string(), options, sort });
+        if let Err(unsent) = self.tx.send(Request { generation, index, text: text.to_string(), options, sort }) {
+            // The search thread is gone (it panicked): answer with an error rather than leave
+            // the caller waiting for a result that never comes.
+            let _ = self.failed.send(Response {
+                generation,
+                index: unsent.into_inner().index,
+                hits: Arc::new(Vec::new()),
+                top: Vec::new(),
+                error: Some("Searching stopped working. Restart FileCraft.".into()),
+                elapsed: Duration::ZERO,
+            });
+        }
         generation
     }
 }
@@ -875,6 +889,28 @@ mod tests {
         let res = searcher.results.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(res.hits.len(), 1);
         assert!(res.top.is_empty());
+    }
+
+    /// Once the search thread has died, a request used to vanish: the caller showed a spinner
+    /// forever. Now it gets an error response for that generation.
+    #[test]
+    fn requests_to_a_dead_search_thread_get_an_error() {
+        let ranker: Ranker = Box::new(|_, _, _| panic!("ranker failed (expected by this test)"));
+        let mut searcher = Searcher::with_ranker(|| {}, ranker);
+        let index = Index::default().with_volume(Arc::new(sample()));
+        // The first request kills the thread; a later one finds it gone.
+        searcher.submit(index.clone(), "main", SearchOptions::default(), Sort::default());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let res = loop {
+            assert!(Instant::now() < deadline, "no error response");
+            let generation = searcher.submit(index.clone(), "main", SearchOptions::default(), Sort::default());
+            if let Ok(res) = searcher.results.recv_timeout(Duration::from_millis(50)) {
+                assert_eq!(res.generation, generation);
+                break res;
+            }
+        };
+        assert!(res.error.is_some());
+        assert!(res.hits.is_empty());
     }
 
     /// A chain of `depth` folders with one file in each, names varying so name order is mixed.
