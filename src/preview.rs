@@ -7,6 +7,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use eframe::egui;
 
@@ -25,6 +26,8 @@ const IMAGE_MAX_SIDE: u32 = 16_384;
 const IMAGE_MAX_ALLOC: u64 = 256 * 1024 * 1024;
 /// Decoded images are scaled down to fit this square before they reach the UI.
 const IMAGE_PREVIEW_SIDE: u32 = 2048;
+/// Backups left in the backup folder this long are deleted when FileCraft starts.
+const STALE_BACKUP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub enum Content {
     Text {
@@ -179,6 +182,8 @@ impl PreviewLoader {
         std::thread::Builder::new()
             .name("preview".into())
             .spawn(move || {
+                // Once per run, before the first preview: off the UI thread, like all file I/O.
+                remove_stale_backups(&backup_dir(), STALE_BACKUP);
                 while let Ok(mut request) = rx.recv() {
                     // Skip selections made while the previous read was in progress.
                     while let Ok(newer) = rx.try_recv() {
@@ -651,6 +656,25 @@ fn backup_dir() -> PathBuf {
     }
 }
 
+/// Deletes backups in `dir` last written more than `max_age` ago: copies kept after a failed
+/// restore (the error named them), or ones another program held open when the save tried to
+/// delete them. Only an existing folder is swept, never through a junction or link (FC-18), and
+/// only regular files in it.
+fn remove_stale_backups(dir: &Path, max_age: Duration) {
+    if fs::symlink_metadata(dir).is_err() || crate::index::ensure_own_dir(dir).is_err() {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        // Not followed: a link's own metadata, which is not a regular file.
+        let Ok(meta) = entry.metadata() else { continue };
+        let stale = meta.modified().is_ok_and(|t| t.elapsed().is_ok_and(|age| age > max_age));
+        if meta.is_file() && stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Overwrites `file` with `new` through its open handle, so permissions, attributes and hard
 /// links are kept. The current content is first streamed to `backup_dir` (constant memory,
 /// whatever the file's size); the copy is deleted once the write completes or the original has
@@ -1054,6 +1078,50 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"after, and longer");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backups a save could not delete, or kept after a failed restore, used to pile up forever.
+    /// Week-old ones are now swept at startup; recent ones may still be needed and stay.
+    #[test]
+    fn stale_backups_are_swept() {
+        let dir = std::env::temp_dir().join(format!("filecraft-backup-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("1-0-old.txt");
+        let recent = dir.join("1-1-recent.txt");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&recent, b"recent").unwrap();
+        let week_ago = SystemTime::now() - STALE_BACKUP - Duration::from_secs(60);
+        fs::File::options().write(true).open(&old).unwrap().set_modified(week_ago).unwrap();
+
+        remove_stale_backups(&dir, STALE_BACKUP);
+        assert!(!old.exists());
+        assert!(recent.exists());
+        fs::remove_dir_all(&dir).unwrap();
+        remove_stale_backups(&dir, STALE_BACKUP);
+        assert!(!dir.exists(), "a missing backup folder is not created");
+    }
+
+    /// FC-18: the sweep never deletes through a junction planted on the backup folder.
+    #[cfg(windows)]
+    #[test]
+    fn backup_sweep_does_not_follow_junctions() {
+        let dir = std::env::temp_dir().join(format!("filecraft-backup-sweep-junction-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let victim = target.join("important.txt");
+        fs::write(&victim, b"keep").unwrap();
+        let week_ago = SystemTime::now() - STALE_BACKUP - Duration::from_secs(60);
+        fs::File::options().write(true).open(&victim).unwrap().set_modified(week_ago).unwrap();
+        let link = dir.join("link");
+        crate::index::tests::junction(&link, &target);
+
+        remove_stale_backups(&link, STALE_BACKUP);
+        let kept = victim.exists();
+        fs::remove_dir(&link).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(kept);
     }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
