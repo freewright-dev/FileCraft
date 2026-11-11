@@ -459,14 +459,16 @@ fn attribute_list_data_pieces(
         let runs = decode_runs(list_attr, total_clusters).ok_or("invalid $ATTRIBUTE_LIST runs")?;
         let mut bytes = Vec::with_capacity(size);
         for (lcn, clusters) in runs {
-            let len = usize::try_from(clusters * cluster).map_err(|_| "invalid $ATTRIBUTE_LIST runs")?;
-            let mut chunk = vec![0u8; len];
+            // Only what the list still needs, in whole clusters: a run may be far longer.
+            let missing = (size - bytes.len()) as u64;
+            let len = clusters.checked_mul(cluster).ok_or("invalid $ATTRIBUTE_LIST runs")?.min(missing.next_multiple_of(cluster));
+            let start = bytes.len();
+            bytes.resize(start + len as usize, 0);
             match lcn {
-                Some(lcn) if read(lcn * cluster, &mut chunk) => {}
+                Some(lcn) if read(lcn * cluster, &mut bytes[start..]) => {}
                 Some(_) => return Err("cannot read $ATTRIBUTE_LIST".into()),
                 None => {}
             }
-            bytes.extend_from_slice(&chunk);
             if bytes.len() >= size {
                 break;
             }
@@ -512,7 +514,8 @@ fn volume_offset(runs: &[(Option<u64>, u64)], cluster: u64, byte: u64) -> Option
 }
 
 /// Decodes the mapping pairs of a non-resident attribute. Fails on an empty run, a negative or
-/// overflowing LCN, or a run that does not fit inside a volume of `total_clusters` (FC-10).
+/// overflowing LCN, a run that does not fit inside a volume of `total_clusters` (FC-10), or a
+/// sparse run longer than the volume.
 fn decode_runs(attr: &[u8], total_clusters: u64) -> Option<Runs> {
     if attr.len() < 0x22 {
         return None;
@@ -540,6 +543,11 @@ fn decode_runs(attr: &[u8], total_clusters: u64) -> Option<Runs> {
             return None;
         }
         if off_size == 0 {
+            // Sparse: no clusters, but no longer than the volume either (it would overflow
+            // byte counts later on).
+            if length > total_clusters {
+                return None;
+            }
             runs.push((None, length));
         } else {
             let mut delta = 0i64;
@@ -748,6 +756,10 @@ mod tests {
         // 0x20 clusters at LCN 0x1000 do not fit a volume of 0x1010 clusters.
         assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1010), None);
         assert_eq!(runs(&[0x21, 0x20, 0x00, 0x10], 0x1020), Some(vec![(Some(0x1000), 0x20)]));
+        // Sparse runs: at most the volume's length (u64::MAX used to wrap byte counts).
+        assert_eq!(runs(&[0x01, 0x20], 0x1F), None);
+        assert_eq!(runs(&[0x01, 0x20], 0x20), Some(vec![(None, 0x20)]));
+        assert_eq!(runs(&[0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], u64::MAX - 1), None);
     }
 
     /// FC-14: when $MFT's run list continues in an extension record ($ATTRIBUTE_LIST), record 0
@@ -789,6 +801,30 @@ mod tests {
         let mut a = non_resident_data(0, runs);
         a[0x10..0x18].copy_from_slice(&vcn.to_le_bytes());
         a
+    }
+
+    /// A non-resident `$ATTRIBUTE_LIST` is read only up to its declared size. Each of its runs
+    /// was read whole first: a run of 2^28 clusters (1 TiB) allocated that much and aborted.
+    #[test]
+    fn attribute_lists_read_only_their_declared_size() {
+        const CLUSTER: u64 = 4096;
+        let list = attribute_list(&[(0, 0)]);
+        let value = list[0x18..0x18 + 0x20].to_vec();
+        // 0x1000_0000 clusters at LCN 30, on a volume of 2^40 clusters.
+        let mut attr = non_resident_data(value.len() as u64, &[0x14, 0x00, 0x00, 0x00, 0x10, 0x1E]);
+        attr[0..4].copy_from_slice(&ATTR_ATTRIBUTE_LIST.to_le_bytes());
+        let mut rec0 = record(RECORD_IN_USE, 0, &[attr]);
+        assert!(apply_fixup(&mut rec0));
+        let mut longest = 0;
+        let mut read = |offset: u64, buf: &mut [u8]| {
+            longest = longest.max(buf.len());
+            if offset == 30 * CLUSTER {
+                buf[..value.len()].copy_from_slice(&value);
+            }
+            true
+        };
+        assert_eq!(attribute_list_data_pieces(&rec0, CLUSTER, 1 << 40, &mut read), Ok(Some(vec![(0, 0)])));
+        assert_eq!(longest, CLUSTER as usize);
     }
 
     /// FC-14: a fragmented $MFT whose run list continues through `$ATTRIBUTE_LIST` is read in

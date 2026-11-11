@@ -147,6 +147,11 @@ All notable changes to this project are documented here. The format follows
   the table was misread: the drive fell back to the slow folder scan, or, when the table had
   spare room, only the first fragment's files were indexed while the drive showed as ready.
   Records are now numbered by their position in the table and put together across fragments.
+- A corrupt or crafted NTFS volume can no longer make the master file table reader allocate
+  terabytes and abort. A stored `$ATTRIBUTE_LIST` was read one whole run at a time, however long
+  the run, before its declared size (at most 16 MB) was checked, and sparse runs had no length
+  limit, so their byte counts could wrap. Only the bytes the list declares are read now, and a
+  sparse run longer than the volume fails closed like other invalid runs.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.

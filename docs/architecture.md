@@ -48,12 +48,14 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   walk:
   - geometry that is incomplete or inconsistent with the volume size;
   - more than 64 Mi records;
-  - a data run that is empty, has a negative or overflowing LCN, or ends past the volume;
+  - a data run that is empty, has a negative or overflowing LCN, or ends past the volume, or a
+    sparse run longer than the volume;
   - runs that hold fewer records than `MftValidDataLength` implies.
 
   When `$MFT` is fragmented enough, record 0 holds only the first piece of its run list, and an
   `$ATTRIBUTE_LIST` (resident or not) names every piece by starting VCN and the extension record
-  holding it. Those records are read through the runs decoded so far. A piece that is missing,
+  holding it. A stored list is read only up to its declared size (at most 16 MB). Those records
+  are read through the runs decoded so far. A piece that is missing,
   starts at the wrong VCN (a gap or overlap), or lies in a record those runs do not reach also
   fails closed.
 
