@@ -12,8 +12,9 @@ use eframe::egui;
 
 /// Bytes shown when previewing (not editing) a text file.
 const PREVIEW_BYTES: usize = 512 * 1024;
-/// Largest file that can be edited inline.
-pub const EDIT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Largest file that can be edited inline. egui lays out the whole buffer as one text block on
+/// every change, which gets slow well before this; larger files go to the external editor.
+pub const EDIT_MAX_BYTES: u64 = 1024 * 1024;
 const DIR_LIMIT: usize = 1000;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "ico", "webp"];
 /// Largest image file that is previewed.
@@ -301,7 +302,7 @@ impl Preview {
         let mut bytes = Vec::new();
         (&file).take(EDIT_MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("file not readable ({e})"))?;
         if bytes.len() as u64 > EDIT_MAX_BYTES {
-            return Err(format!("larger than {} MB", EDIT_MAX_BYTES / (1024 * 1024)));
+            return Err(too_large_to_edit());
         }
         let version = FileVersion::of(&file, &bytes).map_err(|e| format!("file not readable ({e})"))?;
         let (text, valid) = self.decode(&bytes, false);
@@ -342,7 +343,7 @@ impl Preview {
             self.loaded = FileVersion::of(&file, &buf).ok();
         }
         if meta.len() > EDIT_MAX_BYTES {
-            self.not_editable = Some(format!("larger than {} MB", EDIT_MAX_BYTES / (1024 * 1024)));
+            self.not_editable = Some(too_large_to_edit());
         }
         let (text, valid) = self.decode(&buf, truncated);
         if !valid {
@@ -419,18 +420,33 @@ impl Preview {
         self.finish_save(done)
     }
 
-    /// Everything a save needs, detached from the preview so it can run on another thread.
+    /// Everything a save needs, detached from the preview so it can run on another thread. The
+    /// job holds the bytes to write, but not a second copy of the buffer: only what the preview
+    /// shows afterwards and a fingerprint to tell whether the buffer changed while it ran.
     pub fn save_job(&self, force: bool) -> SaveJob {
         let mut out = Vec::with_capacity(self.buffer.len() + 3);
         if self.bom {
             out.extend_from_slice(b"\xEF\xBB\xBF");
         }
         if self.crlf {
-            out.extend_from_slice(self.buffer.replace('\n', "\r\n").as_bytes());
+            // Written line by line, without a converted copy of the whole buffer.
+            for (i, line) in self.buffer.split('\n').enumerate() {
+                if i > 0 {
+                    out.extend_from_slice(b"\r\n");
+                }
+                out.extend_from_slice(line.as_bytes());
+            }
         } else {
             out.extend_from_slice(self.buffer.as_bytes());
         }
-        SaveJob { path: self.path.clone(), out, buffer: self.buffer.clone(), loaded: self.loaded, force }
+        let truncated = self.buffer.len() > PREVIEW_BYTES;
+        let saved = SavedText {
+            len: self.buffer.len(),
+            hash: text_hash(&self.buffer),
+            shown: truncate_at_char(&self.buffer, PREVIEW_BYTES),
+            truncated,
+        };
+        SaveJob { path: self.path.clone(), out, saved, loaded: self.loaded, force }
     }
 
     /// Applies a finished save. Edits made while it ran keep the buffer dirty.
@@ -441,11 +457,10 @@ impl Preview {
         match done.result {
             Ok(version) => {
                 self.loaded = Some(version);
-                self.dirty = self.editing && self.buffer != done.buffer;
+                let saved = done.saved;
+                self.dirty = self.editing && (self.buffer.len() != saved.len || text_hash(&self.buffer) != saved.hash);
                 self.conflict = None;
-                let truncated = done.buffer.len() > PREVIEW_BYTES;
-                let shown = if truncated { truncate_at_char(&done.buffer, PREVIEW_BYTES) } else { done.buffer };
-                self.content = Content::Text { text: shown, truncated };
+                self.content = Content::Text { text: saved.shown, truncated: saved.truncated };
                 Ok(())
             }
             Err(e) => {
@@ -458,12 +473,28 @@ impl Preview {
     }
 }
 
+/// The edit buffer a save wrote, as far as the preview needs it afterwards.
+struct SavedText {
+    /// Length and hash of the whole buffer (SipHash with fixed keys, like [`FileVersion`]).
+    len: usize,
+    hash: u64,
+    /// What the preview shows once the save is done: at most [`PREVIEW_BYTES`] of it.
+    shown: String,
+    truncated: bool,
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// A save detached from the preview (see [`Preview::save_job`]).
 pub struct SaveJob {
     path: PathBuf,
     /// Bytes to write: the buffer with its byte-order mark and line endings restored.
     out: Vec<u8>,
-    buffer: String,
+    saved: SavedText,
     loaded: Option<FileVersion>,
     force: bool,
 }
@@ -471,7 +502,7 @@ pub struct SaveJob {
 /// The outcome of a [`SaveJob`], for [`Preview::finish_save`].
 pub struct SaveDone {
     path: PathBuf,
-    buffer: String,
+    saved: SavedText,
     result: Result<FileVersion, SaveError>,
 }
 
@@ -490,7 +521,7 @@ impl SaveJob {
     /// Overwrite streams the backup however large the file has grown (FC-13).
     pub fn run(self) -> SaveDone {
         let result = self.write();
-        SaveDone { path: self.path, buffer: self.buffer, result }
+        SaveDone { path: self.path, saved: self.saved, result }
     }
 
     fn write(&self) -> Result<FileVersion, SaveError> {
@@ -680,6 +711,11 @@ fn overwrite(file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Why a file over [`EDIT_MAX_BYTES`] is not edited inline.
+fn too_large_to_edit() -> String {
+    format!("larger than {} MB; use the external editor (Ctrl+E)", EDIT_MAX_BYTES / (1024 * 1024))
+}
+
 fn truncate_at_char(s: &str, max: usize) -> String {
     let mut end = max.min(s.len());
     while !s.is_char_boundary(end) {
@@ -790,15 +826,28 @@ mod tests {
         let path = temp("grows.txt", &vec![b'a'; 600 * 1024]);
         let mut p = Preview::load(&path, false);
         assert!(p.needs_full_read());
-        fs::write(&path, vec![b'b'; 9 * 1024 * 1024]).unwrap();
+        fs::write(&path, vec![b'b'; 2 * 1024 * 1024]).unwrap();
 
         assert!(p.begin_edit().is_err());
         assert!(!p.editing && p.buffer.is_empty());
         let reason = p.read_full().unwrap_err();
-        assert!(reason.contains("larger than 8 MB"), "{reason}");
+        assert!(reason.contains("larger than 1 MB"), "{reason}");
 
         let p = Preview::load_for_edit(&path);
         assert!(!p.can_edit() && !p.needs_full_read());
+        fs::remove_file(path).unwrap();
+    }
+
+    /// Inline editing used to admit 8 MB into one egui text field, which lays the whole buffer
+    /// out again on every change. Past 1 MB the file is left to the external editor.
+    #[test]
+    fn files_over_a_megabyte_go_to_the_external_editor() {
+        let path = temp("over-edit-limit.txt", &vec![b'a'; EDIT_MAX_BYTES as usize + 1]);
+        let mut p = Preview::load_for_edit(&path);
+        let reason = p.begin_edit().unwrap_err();
+        assert!(reason.contains("larger than 1 MB") && reason.contains("external editor"), "{reason}");
+        fs::write(&path, vec![b'a'; EDIT_MAX_BYTES as usize]).unwrap();
+        assert!(Preview::load_for_edit(&path).begin_edit().is_ok());
         fs::remove_file(path).unwrap();
     }
 
