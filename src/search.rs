@@ -689,6 +689,23 @@ fn merge_two(a: Vec<Hit>, b: Vec<Hit>, cmp: &impl Fn(Hit, Hit) -> Ordering) -> V
     out
 }
 
+/// Where the entry with this lowercased name and full path is in `hits`, which are in `sort`
+/// order on `index`. Sorted by name, entries with the same name are next to each other, so a
+/// binary search finds them without looking at every hit; other orders are scanned.
+pub fn find_row(index: &Index, hits: &[Hit], sort: Sort, lower_name: &str, path: &str) -> Option<usize> {
+    let name_of = |h: &Hit| index.volume(h.vol).lower_name(h.idx);
+    let is_it = |h: &Hit| name_of(h) == lower_name && index.volume(h.vol).full_path(h.idx) == path;
+    if sort.key != SortKey::Name {
+        return hits.iter().position(is_it);
+    }
+    let start = hits.partition_point(|h| if sort.descending { name_of(h) > lower_name } else { name_of(h) < lower_name });
+    hits[start..]
+        .iter()
+        .take_while(|h| name_of(h) == lower_name)
+        .position(is_it)
+        .map(|row| start + row)
+}
+
 // ─── Background searcher ────────────────────────────────────────────────────
 
 pub struct Request {
@@ -704,6 +721,8 @@ pub struct Response {
     /// The snapshot the hits refer to.
     pub index: Index,
     pub hits: Arc<Vec<Hit>>,
+    /// The order the hits are in.
+    pub sort: Sort,
     /// What the searcher's ranker picked from the hits; empty without a ranker.
     pub top: Vec<Hit>,
     pub error: Option<String>,
@@ -823,6 +842,7 @@ impl Searcher {
                         generation,
                         index: req.index,
                         hits,
+                        sort: req.sort,
                         top,
                         error,
                         elapsed: start.elapsed(),
@@ -849,6 +869,7 @@ impl Searcher {
                 generation,
                 index: unsent.into_inner().index,
                 hits: Arc::new(Vec::new()),
+                sort,
                 top: Vec::new(),
                 error: Some("Searching stopped working. Restart FileCraft.".into()),
                 elapsed: Duration::ZERO,
@@ -1152,6 +1173,32 @@ mod tests {
         assert_eq!(run("^(main|big)\\.", opts, Sort::default()).unwrap(), ["big.bin", "main.rs"]);
         let opts = SearchOptions { match_path: true, ..Default::default() };
         assert_eq!(run("src", opts, Sort::default()).unwrap(), ["main.rs", "src"]);
+    }
+
+    /// The selection is found again in new results by name and path. Sorted by name that is a
+    /// binary search; it must find every row in every order, same names on two drives included.
+    #[test]
+    fn find_row_finds_every_hit_in_every_order() {
+        let mut b = VolumeBuilder::new('D');
+        b.push("main.rs", 0, 0, 5, 5);
+        let src = b.push("SRC", 0, ATTR_DIRECTORY, 0, 0);
+        b.push("Main.rs", src, 0, 7, 7);
+        b.push("readme.md", src, 0, 1, 1);
+        let d = b.finish(Source::Walk, Duration::ZERO);
+        let index = Index::default().with_volume(Arc::new(sample())).with_volume(Arc::new(d));
+        let q = Query::parse("", SearchOptions::default()).unwrap();
+        for key in [SortKey::Name, SortKey::Path, SortKey::Size, SortKey::Modified] {
+            for descending in [false, true] {
+                let sort = Sort { key, descending };
+                let hits = search(&index, &q, sort, &|| false).unwrap();
+                for (row, h) in hits.iter().enumerate() {
+                    let v = index.volume(h.vol);
+                    assert_eq!(find_row(&index, &hits, sort, v.lower_name(h.idx), &v.full_path(h.idx)), Some(row), "{sort:?}");
+                }
+                assert_eq!(find_row(&index, &hits, sort, "main.rs", r"E:\main.rs"), None);
+                assert_eq!(find_row(&index, &hits, sort, "zzz", r"C:\zzz"), None);
+            }
+        }
     }
 
     #[test]
