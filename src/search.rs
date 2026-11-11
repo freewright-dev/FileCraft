@@ -591,9 +591,8 @@ pub fn search(index: &Index, q: &Query, sort: Sort, cancelled: &(dyn Fn() -> boo
 }
 
 fn merge(index: &Index, lists: &[Vec<u32>], key: SortKey) -> Vec<Hit> {
-    let total = lists.iter().map(Vec::len).sum();
-    let mut out = Vec::with_capacity(total);
     if key == SortKey::Path || lists.len() == 1 {
+        let mut out = Vec::with_capacity(lists.iter().map(Vec::len).sum());
         // Volumes are already in drive-letter order, which is path order.
         for (vol, list) in lists.iter().enumerate() {
             out.extend(list.iter().map(|&idx| Hit { vol: vol as u8, idx }));
@@ -638,8 +637,7 @@ fn merge(index: &Index, lists: &[Vec<u32>], key: SortKey) -> Vec<Hit> {
             handles.into_iter().map(|h| h.join().expect("merge thread")).collect()
         });
     }
-    out.extend(runs.pop().unwrap_or_default());
-    out
+    runs.pop().unwrap_or_default()
 }
 
 fn merge_two(a: Vec<Hit>, b: Vec<Hit>, cmp: &impl Fn(Hit, Hit) -> Ordering) -> Vec<Hit> {

@@ -135,6 +135,9 @@ All notable changes to this project are documented here. The format follows
 - `!folder:tmp` and `!file:tmp` now exclude the folders (or files) containing `tmp` and keep
   everything else. The `!` applied only to the text, so `!folder:tmp` meant "folders not
   containing `tmp`" and hid every file.
+- A search sorted by name, size or date over several drives no longer copies its whole merged
+  result list once more before returning it: about 40 MB of memory traffic per keystroke on a
+  5-million-entry index.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
