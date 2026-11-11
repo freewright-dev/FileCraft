@@ -93,6 +93,10 @@ All notable changes to this project are documented here. The format follows
   "recall on open" attribute some sync and storage tiering providers use) no longer downloads it.
   Only offline and recall-on-access placeholders were skipped before; now these get the same
   "not fully available on this device" message instead of a preview.
+- Inline editing is limited to files up to 1 MB (was 8 MB); larger files say to use the external
+  editor. The editor lays out the whole file as one block of text on every keystroke, so a
+  multi-megabyte file took seconds per change and hundreds of MB of memory. A save also no longer
+  keeps a second full copy of the text while it runs.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor

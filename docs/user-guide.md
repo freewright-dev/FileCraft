@@ -102,12 +102,13 @@ Select a file to preview it. Text files show their first 512 KB. Images (PNG, JP
 ICO, WebP) up to 64 MB and 16,384 pixels per side are shown scaled to fit; animations show their
 first frame.
 
-- **✏ Edit** (or F4) turns the preview into an editor for files up to 8 MB that are UTF-8 text.
+- **✏ Edit** (or F4) turns the preview into an editor for files up to 1 MB that are UTF-8 text;
+  open larger files in the external editor (Ctrl+E).
   **Ctrl+S** saves. The file's byte-order mark and Windows (`CRLF`) line endings are kept. A file
   that mixes `CRLF` and `LF` shows a notice while editing: saving uses its more common ending for
   every line.
   A file longer than the preview is first read in full in the background, and editing starts
-  when that is done. If it has grown past 8 MB by then, editing is refused. Saving runs in the
+  when that is done. If it has grown past 1 MB by then, editing is refused. Saving runs in the
   background, so the window stays responsive; while it runs, switching to another result or
   closing waits for it. A file that grew while you were editing it is reported as changed on disk
   without being read, and Overwrite still saves it, however large it has become.
