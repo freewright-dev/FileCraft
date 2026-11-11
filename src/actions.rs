@@ -132,7 +132,8 @@ pub fn default_editor() -> String {
         .unwrap_or_else(|| "notepad".to_string())
 }
 
-/// The program `editor` would start, as `edit_externally` resolves it.
+/// The program `editor` starts. It is resolved once: [`edit_with`] runs exactly this file, so
+/// the program shown for confirmation is the one that runs.
 pub fn editor_program(editor: &str) -> io::Result<std::path::PathBuf> {
     let program = split_command_line(editor).into_iter().next().unwrap_or_else(|| "notepad".to_string());
     #[cfg(windows)]
@@ -145,36 +146,28 @@ pub fn editor_program(editor: &str) -> io::Result<std::path::PathBuf> {
     }
 }
 
-/// Launches `editor` (a command line such as `code -n`) with the file appended.
-pub fn edit_externally(editor: &str, path: &Path) -> io::Result<()> {
-    editor_command(editor, path)?.spawn().map(|_| ())
+/// Launches `program`, as [`editor_program`] resolved it for `editor` (a command line such as
+/// `code -n`), with the editor's arguments and the file appended.
+pub fn edit_with(program: &Path, editor: &str, path: &Path) -> io::Result<()> {
+    editor_command(program, editor, path).spawn().map(|_| ())
 }
 
 /// Builds the editor process. The file path is always a separate argument, never shell text:
 /// the editor runs directly instead of through `cmd /C`, so names like `a&calc&.txt` stay literal.
-fn editor_command(editor: &str, path: &Path) -> io::Result<Command> {
-    let mut parts = split_command_line(editor).into_iter();
-    let program = parts.next().unwrap_or_else(|| "notepad".to_string());
+fn editor_command(program: &Path, editor: &str, path: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(split_command_line(editor).into_iter().skip(1)).arg(path);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let program = resolve_program(&program)?;
-        let mut cmd = Command::new(&program);
-        cmd.args(parts).arg(path);
-        if has_extension(&program, &["bat", "cmd"]) {
+        if has_extension(program, &["bat", "cmd"]) {
             // Shims such as VS Code's `code.cmd`: std runs them via cmd.exe and escapes every
             // argument for it, refusing ones it cannot escape safely. No console window flashes.
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        Ok(cmd)
     }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new(program);
-        cmd.args(parts).arg(path);
-        Ok(cmd)
-    }
+    cmd
 }
 
 /// Splits a command line on whitespace; double quotes group words, so
@@ -343,10 +336,9 @@ mod tests {
         let marker = dir.join("injected");
         let name = format!(r"{}\report&type nul>{}&rem %PATH%.txt", dir.display(), marker.display());
 
-        let status = editor_command(&format!("\"{}\"", shim.display()), Path::new(&name))
-            .unwrap()
-            .status()
-            .unwrap();
+        let editor = format!("\"{}\"", shim.display());
+        let program = editor_program(&editor).unwrap();
+        let status = editor_command(&program, &editor, Path::new(&name)).status().unwrap();
         assert!(status.success());
         let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
         let injected = marker.exists();
@@ -355,5 +347,24 @@ mod tests {
         assert!(!injected, "file name ran as a command");
         assert!(args.contains("report&type nul>"), "{args}");
         assert!(args.contains("%PATH%"), "{args}");
+    }
+
+    /// FC-18: the elevated confirmation shows the resolved program and the launch used to look
+    /// the command up again. The launch now runs the program it is given, whatever the command's
+    /// first word would resolve to by then; only the arguments come from the command.
+    #[cfg(windows)]
+    #[test]
+    fn launches_the_program_that_was_resolved() {
+        let dir = std::env::temp_dir().join(format!("filecraft-editor-resolved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("shim.cmd");
+        std::fs::write(&shim, "@echo off\r\n>\"%~dp0args.txt\" echo(%*\r\n").unwrap();
+
+        let status = editor_command(&shim, "filecraft-no-such-editor -n", Path::new("file.txt")).status().unwrap();
+        let args = std::fs::read_to_string(dir.join("args.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(status.success());
+        assert_eq!(args.unwrap().trim(), "-n file.txt");
     }
 }
