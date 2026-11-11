@@ -73,6 +73,9 @@ All notable changes to this project are documented here. The format follows
   are now rejected and rebuilt, and the file's bytes are freed before the remaining checks run.
 - The index the NTFS helper sends is freed in the same way before its tree and sort orders are
   checked, instead of staying in memory beside the parsed copy until the checks finish.
+- A drive with more than 64 Mi entries is no longer written to a cache that loading would reject.
+  Its index is still built and searchable, and the drive indicator's hover text says why it is
+  not cached.
 - Date filters such as `dm:2026-01-15` or `dm:>2026-07-01` now start at local midnight of that
   date. They used the UTC offset in effect today, so for a date on the other side of a
   daylight-saving change the day started and ended an hour early or late. `dm:today` also starts

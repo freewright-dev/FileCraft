@@ -634,6 +634,10 @@ impl VolumeIndex {
     /// Nothing is replaced when `superseded` says a newer job owns this drive, or when `path`
     /// already holds a snapshot built later (by another instance): the newest snapshot wins.
     pub fn save_unless(&self, path: &Path, superseded: &dyn Fn() -> bool) -> io::Result<bool> {
+        // Loading rejects such a cache, so writing it would only cost time and disk space.
+        if self.entries.len() > MAX_CACHE_ENTRIES {
+            return Err(io::Error::other("the drive has too many entries to cache (over 64 Mi)"));
+        }
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
         ensure_own_dir(dir)?;
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
