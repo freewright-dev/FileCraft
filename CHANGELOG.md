@@ -161,6 +161,11 @@ All notable changes to this project are documented here. The format follows
   reader ignored the sequence number NTFS adds to each parent reference, so such files showed up
   with wrong full paths. A parent reference must now match its record's sequence number, and
   entries whose parent does not are left out like other invalid ones.
+- A bug in the master file table reader no longer ends FileCraft or its NTFS helper. Release
+  builds aborted the whole process on any panic, so the helper's "the NTFS reader panicked" reply
+  could never be sent, and FileCraft started as administrator closed instead of scanning folders.
+  Release builds now unwind: the helper reports the failure and keeps serving, and FileCraft
+  reading the table itself falls back to the folder scan for that drive.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
