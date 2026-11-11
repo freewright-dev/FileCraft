@@ -159,6 +159,8 @@ All notable changes to this project are documented here. The format follows
 - The notification area icon's menu opens at the icon when opened with the keyboard (the Menu key
   or Shift+F10), instead of wherever the mouse pointer happened to be, and an item can be chosen by
   releasing the right mouse button over it.
+- Restoring the notification area icon after Explorer restarts no longer leaks an icon handle
+  each time; the icon is loaded as a shared resource.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
