@@ -94,6 +94,16 @@ fn hotkey_edit(text: &str, in_effect: Hotkey, works: bool, lost_focus: bool, set
     }
 }
 
+/// The search options to remember. `Shift+Enter` in the bar switches the main window to the
+/// default options, to show the bar's results; that lasts for the session, and the user's own
+/// options are still the ones saved, unless the user changes an option in the meantime.
+fn options_to_save(options: SearchOptions, before_bar: Option<SearchOptions>) -> SearchOptions {
+    match before_bar {
+        Some(own) if options == SearchOptions::default() => own,
+        _ => options,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RowAction {
     Open,
@@ -114,6 +124,8 @@ pub struct FileCraftApp {
 
     query: String,
     options: SearchOptions,
+    /// The user's own options while the default ones of a query from the bar stand in for them.
+    options_before_bar: Option<SearchOptions>,
     sort: Sort,
     needs_search: bool,
     latest_generation: u64,
@@ -222,6 +234,7 @@ impl FileCraftApp {
             index: Index::default(),
             query: String::new(),
             options,
+            options_before_bar: None,
             sort,
             needs_search: true,
             latest_generation: 0,
@@ -398,8 +411,16 @@ impl FileCraftApp {
     }
 
     fn poll_background(&mut self, ctx: &egui::Context) {
+        if self.options != SearchOptions::default() {
+            // The user has chosen options again since a query came from the bar.
+            self.options_before_bar = None;
+        }
         while let Ok(query) = self.from_bar.try_recv() {
-            // The bar searches with the default options, so this shows the same results.
+            // The bar searches with the default options, so this shows the same results. They
+            // stand in for the user's own only in this session: those are still what is saved.
+            if self.options != SearchOptions::default() {
+                self.options_before_bar = Some(self.options);
+            }
             self.options = SearchOptions::default();
             self.query = query;
             self.submit_search();
@@ -1730,14 +1751,15 @@ impl eframe::App for FileCraftApp {
         storage.set_string(KEY_EXCLUDED, self.excluded.iter().collect());
         storage.set_string(KEY_MAX_AGE, self.max_age_minutes.to_string());
         storage.set_string(KEY_PREVIEW, if self.show_preview { "1" } else { "0" }.into());
+        let options = options_to_save(self.options, self.options_before_bar);
         let mut flags = String::new();
-        if self.options.match_case {
+        if options.match_case {
             flags.push('c');
         }
-        if self.options.match_path {
+        if options.match_path {
             flags.push('p');
         }
-        if self.options.regex {
+        if options.regex {
             flags.push('r');
         }
         storage.set_string(KEY_OPTIONS, flags);
@@ -1818,5 +1840,20 @@ mod tests {
         let alt_space = Hotkey::parse("Alt+Space").unwrap();
         assert_eq!(hotkey_edit("Ctrl+", alt_space, true, false, true), HotkeyEdit::Keep);
         assert_eq!(hotkey_edit("Ctrl+", alt_space, false, false, true), HotkeyEdit::Keep);
+    }
+
+    /// `Shift+Enter` from the bar used to overwrite the saved options with the defaults.
+    #[test]
+    fn a_query_from_the_bar_does_not_replace_the_saved_options() {
+        let own = SearchOptions { regex: true, match_case: true, ..Default::default() };
+        assert_eq!(options_to_save(SearchOptions::default(), Some(own)), own);
+        assert_eq!(options_to_save(own, None), own);
+    }
+
+    #[test]
+    fn options_chosen_after_a_query_from_the_bar_are_saved() {
+        let own = SearchOptions { regex: true, ..Default::default() };
+        let chosen = SearchOptions { match_path: true, ..Default::default() };
+        assert_eq!(options_to_save(chosen, Some(own)), chosen);
     }
 }

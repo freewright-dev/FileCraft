@@ -26,7 +26,9 @@ Press **Alt+Space** anywhere in Windows to open a small search box in the middle
 are working on. It takes the same search syntax as the main window, and shows the best eight
 results: names that match what you typed most closely come first, and programs and shortcuts before
 other files. It always searches with the default options (not the **Search** menu's), and
-`Shift+Enter` switches the main window to those options too, so it shows the same results.
+`Shift+Enter` switches the main window to those options too, so it shows the same results. That
+lasts until FileCraft restarts: your own options are still the ones remembered, unless you change
+an option yourself in the meantime.
 
 | Key | Action |
 | --- | --- |
