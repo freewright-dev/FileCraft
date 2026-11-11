@@ -60,6 +60,10 @@ All notable changes to this project are documented here. The format follows
   startup; it is ignored and rebuilt. Loading also rejects caches for another drive, files over
   4 GiB, invalid name ranges, parent loops, incomplete or duplicated sort orders and trailing
   data (FC-02).
+- Finishing an index no longer runs its four sort orders side by side. Each sort already uses
+  every core, so a large drive briefly ran up to four times as many sort threads as cores and
+  held four merge buffers at once, multiplied again when several drives finished together. The
+  sorts now run one after another.
 - Editing a file longer than its preview no longer reads it on the UI thread without a limit.
   The whole file is read on the preview thread, never more than 8 MB, even if it grew after it
   was previewed, and only if it is still a regular file available locally (FC-05).

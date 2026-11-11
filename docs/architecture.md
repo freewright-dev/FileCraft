@@ -24,7 +24,8 @@ offsets into two string arenas: original names and lowercased names). Entry 0 is
 full paths are rebuilt on demand by walking parent ids, so no path strings are stored.
 
 Four sort orders (`by_name`, `by_path`, `by_size`, `by_date`) are precomputed with a parallel
-merge sort when the index is built. Searching walks the order for the requested column and keeps
+merge sort when the index is built, one after another so a build never runs more sort threads
+or merge buffers than one sort needs. Searching walks the order for the requested column and keeps
 matching ids, so results come out already sorted and no per-query sort is needed. The path order
 sorts by (rank of the parent folder, name). Folder ranks follow the chain of names from the root,
 compared name by name (a folder before its subfolders). They are computed without building paths,

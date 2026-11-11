@@ -327,43 +327,23 @@ impl VolumeBuilder {
             .filter(|&i| entries[i as usize].parent != NONE)
             .collect();
 
-        let (by_name, by_path, by_size, by_date) = std::thread::scope(|s| {
-            let name = s.spawn(|| {
-                let mut v = ids.clone();
-                par_sort_by(&mut v, |&a, &b| lower_of(a).cmp(lower_of(b)).then(a.cmp(&b)));
-                v
+        // One sort at a time: each already uses every core, and running them side by side
+        // multiplied the threads and the merge buffers by four.
+        let mut by_name = ids.clone();
+        par_sort_by(&mut by_name, |&a, &b| lower_of(a).cmp(lower_of(b)).then(a.cmp(&b)));
+        let mut by_path = ids.clone();
+        {
+            let rank = directory_ranks(entries, &lower_of);
+            par_sort_by(&mut by_path, |&a, &b| {
+                let pa = rank[entries[a as usize].parent as usize];
+                let pb = rank[entries[b as usize].parent as usize];
+                pa.cmp(&pb).then_with(|| lower_of(a).cmp(lower_of(b))).then(a.cmp(&b))
             });
-            let path = s.spawn(|| {
-                let rank = directory_ranks(entries, &lower_of);
-                let mut v = ids.clone();
-                par_sort_by(&mut v, |&a, &b| {
-                    let pa = rank[entries[a as usize].parent as usize];
-                    let pb = rank[entries[b as usize].parent as usize];
-                    pa.cmp(&pb).then_with(|| lower_of(a).cmp(lower_of(b))).then(a.cmp(&b))
-                });
-                v
-            });
-            let size = s.spawn(|| {
-                let mut v = ids.clone();
-                par_sort_by(&mut v, |&a, &b| {
-                    entries[a as usize].size.cmp(&entries[b as usize].size).then(a.cmp(&b))
-                });
-                v
-            });
-            let date = s.spawn(|| {
-                let mut v = ids.clone();
-                par_sort_by(&mut v, |&a, &b| {
-                    entries[a as usize].mtime.cmp(&entries[b as usize].mtime).then(a.cmp(&b))
-                });
-                v
-            });
-            (
-                name.join().expect("name sort"),
-                path.join().expect("path sort"),
-                size.join().expect("size sort"),
-                date.join().expect("date sort"),
-            )
-        });
+        }
+        let mut by_size = ids.clone();
+        par_sort_by(&mut by_size, |&a, &b| entries[a as usize].size.cmp(&entries[b as usize].size).then(a.cmp(&b)));
+        let mut by_date = ids;
+        par_sort_by(&mut by_date, |&a, &b| entries[a as usize].mtime.cmp(&entries[b as usize].mtime).then(a.cmp(&b)));
 
         VolumeIndex {
             letter: self.letter,
