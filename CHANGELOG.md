@@ -141,6 +141,12 @@ All notable changes to this project are documented here. The format follows
   NTFS drive queued behind it, indexing forever. The helper reports progress several times a
   second while it reads; after two minutes without a word FileCraft stops using it, and the drive
   falls back to the folder scan.
+- On NTFS volumes with clusters smaller than a master file table record (formatted with 512-byte
+  clusters, for example), a record split across two fragments of the table no longer throws off
+  every record after it. Each fragment was cut into records from its own start, so the rest of
+  the table was misread: the drive fell back to the slow folder scan, or, when the table had
+  spare room, only the first fragment's files were indexed while the drive showed as ready.
+  Records are now numbered by their position in the table and put together across fragments.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
