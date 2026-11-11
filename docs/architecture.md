@@ -66,9 +66,10 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   dot or a space are listed themselves (Win32 strips those characters from plain paths). Worker
   threads pull directories from a shared queue. Every entry gets its
   final id from an atomic counter, so subdirectories are queued with their id and a single
-  collector thread fills the table without any path lookups. Junctions and symlinks are listed but
-  not followed. A name that is not valid Unicode is stored as `?`, counted as skipped and, for a
-  folder, not entered. On Windows the metadata comes from the directory listing itself. Entries reach
+  collector thread fills the table without any path lookups. Junctions, symlinks and mount points
+  are listed but not followed; they are counted for the status bar's hover text. A name that is not
+  valid Unicode is stored as `?`, counted as skipped and, for a folder, not entered. On Windows the
+  metadata comes from the directory listing itself. Entries reach
   the collector in batches of at most 4,096 through a bounded channel. Only workers send and only
   the collector receives, so a slow collector holds the workers back without any risk of
   deadlock. When the shared queue holds 4,096 folders, a worker keeps the folders it finds on its

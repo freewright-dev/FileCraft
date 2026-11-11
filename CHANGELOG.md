@@ -169,6 +169,10 @@ All notable changes to this project are documented here. The format follows
 - A panic in one drive's indexing job no longer takes the window down with it. The job held the
   shared drive-status lock while it failed, and the status bar's next read of that lock panicked
   the UI thread; reads now recover the status as it was.
+- The drive indicator's hover text says how many linked folders (junctions, symbolic links and
+  mounted drives) a folder scan listed without entering. Their contents were left out with no
+  sign, so a disk mounted into a folder without a drive letter was never indexed while the drive
+  looked complete.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.

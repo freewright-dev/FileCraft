@@ -18,7 +18,10 @@ shows its window.
 - **Status bar** — number of results, search time, and one indicator per drive:
   `…` waiting, `45%` reading the MFT, `1,234,567` entries found by a folder scan so far,
   `✔` ready, `⟳` refreshing in the background, `✖` failed (hover for details). The hover text
-  also says how many items a folder scan could not read, and whether the index could not be cached.
+  also says how many items a folder scan could not read, how many linked folders (junctions,
+  symbolic links, drives mounted into a folder) it listed without entering, and whether the
+  index could not be cached. The contents of a drive mounted into a folder are only indexed when
+  it also has a drive letter.
 
 ## Quick search bar
 
