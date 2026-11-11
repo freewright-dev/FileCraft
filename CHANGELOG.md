@@ -156,6 +156,9 @@ All notable changes to this project are documented here. The format follows
 - Pressing the quick search hotkey twice in quick succession closes the bar again. The hotkey
   decided by whether the window was already visible, which lags behind showing and hiding it, so
   a fast second press could open the bar again instead of closing it (and the other way round).
+- The notification area icon's menu opens at the icon when opened with the keyboard (the Menu key
+  or Shift+F10), instead of wherever the mouse pointer happened to be, and an item can be chosen by
+  releasing the right mouse button over it.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).

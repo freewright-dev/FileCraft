@@ -207,7 +207,7 @@ mod platform {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -218,11 +218,11 @@ mod platform {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
-        DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GetCursorPos,
+        DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
         GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, IMAGE_ICON,
         IsWindowVisible, LoadImageW, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindowAsync, TPM_RETURNCMD, TrackPopupMenu,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindowAsync, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
         TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_NULL, WNDCLASSW, WS_OVERLAPPED,
     };
 
@@ -437,7 +437,14 @@ mod platform {
         }
     }
 
-    fn tray_menu(hwnd: HWND) {
+    /// The point a version-4 icon's `WM_CONTEXTMENU` carries in `wparam`: where the menu belongs,
+    /// also when it was opened from the keyboard. Each coordinate is a signed 16-bit value, since
+    /// monitors left of or above the primary one have negative coordinates.
+    fn menu_anchor(wparam: WPARAM) -> (i32, i32) {
+        (i32::from(wparam as u16 as i16), i32::from((wparam >> 16) as u16 as i16))
+    }
+
+    fn tray_menu(hwnd: HWND, (x, y): (i32, i32)) {
         let items = [(MENU_OPEN, "Open FileCraft"), (MENU_SEARCH, "Quick search"), (MENU_EXIT, "Exit")];
         // SAFETY: the strings outlive the calls that read them. Taking the foreground first is what
         // Windows requires for the menu to close when the user clicks elsewhere, and the posted
@@ -450,10 +457,10 @@ mod platform {
             for (id, label) in items {
                 AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
             }
-            let mut at = POINT { x: 0, y: 0 };
-            GetCursorPos(&mut at);
             SetForegroundWindow(hwnd);
-            let choice = TrackPopupMenu(menu, TPM_RETURNCMD, at.x, at.y, 0, hwnd, std::ptr::null());
+            // Right-button tracking lets an item be chosen by releasing the right button.
+            let flags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
+            let choice = TrackPopupMenu(menu, flags, x, y, 0, hwnd, std::ptr::null());
             PostMessageW(hwnd, WM_NULL, 0, 0);
             DestroyMenu(menu);
             choice as usize
@@ -475,7 +482,7 @@ mod platform {
             // With icon version 4, the low word of `lparam` is the event.
             WM_TRAY => match lparam as u32 & 0xFFFF {
                 NIN_SELECT | NIN_KEYSELECT => with_state(|state| state.send(Event::ShowMain)),
-                WM_CONTEXTMENU => tray_menu(hwnd),
+                WM_CONTEXTMENU => tray_menu(hwnd, menu_anchor(wparam)),
                 _ => {}
             },
             // From outside, such as `taskkill`: exit properly, rather than losing this window and
@@ -650,6 +657,18 @@ mod platform {
             // We were just started by the user, so we may pass the foreground on.
             AllowSetForegroundWindow(pid);
             PostMessageW(hwnd, WM_SHOW_MAIN, 0, 0) != 0
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::menu_anchor;
+
+        #[test]
+        fn the_menu_anchor_reads_signed_coordinates() {
+            assert_eq!(menu_anchor(0x0258_0320), (800, 600));
+            // A monitor left of and above the primary one.
+            assert_eq!(menu_anchor(0xFF38_FC18), (-1000, -200));
         }
     }
 }
