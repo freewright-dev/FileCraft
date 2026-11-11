@@ -161,6 +161,9 @@ All notable changes to this project are documented here. The format follows
   releasing the right mouse button over it.
 - Restoring the notification area icon after Explorer restarts no longer leaks an icon handle
   each time; the icon is loaded as a shared resource.
+- Turning quick search off or exiting releases the hotkey explicitly, before removing the
+  notification area icon. It was left to window teardown, after the icon, so if Explorer was slow
+  to respond, turning quick search back on could report the hotkey as taken by FileCraft itself.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
