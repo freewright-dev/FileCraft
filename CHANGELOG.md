@@ -86,6 +86,9 @@ All notable changes to this project are documented here. The format follows
   turned into a network path. Images are now read and decoded on the preview thread within byte,
   size and memory limits, show only their first frame, are scaled down to fit the pane, and their
   texture is freed with the preview. egui's whole-file image loaders are no longer installed (FC-08).
+- A malformed image that makes the decoder panic no longer stops previews. The panic ended the
+  preview thread, so no other item previewed again (and release builds closed FileCraft, losing
+  unsaved edits); now the pane shows "Cannot show image" for that file.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor

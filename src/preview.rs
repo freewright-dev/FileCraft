@@ -316,7 +316,7 @@ impl Preview {
         let ext = self.path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             self.not_editable = Some("image".into());
-            return match load_image(&self.path) {
+            return match catch_decoder_panic(|| load_image(&self.path)) {
                 Ok(pixels) => Content::Image(ImagePreview { pixels: Some(pixels), texture: None }),
                 Err(e) => Content::Message(format!("Cannot show image: {e}")),
             };
@@ -562,6 +562,14 @@ fn load_image(path: &Path) -> Result<egui::ColorImage, String> {
     let rgba = image.into_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+}
+
+/// Runs an image decoder on untrusted file content. A decoder that panics on a malformed file
+/// is reported like any other decoding error instead of ending the preview thread, after which
+/// no preview would load again. This relies on panics unwinding (no `panic = "abort"`).
+fn catch_decoder_panic<T>(decode: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
+        .unwrap_or_else(|_| Err("the image decoder failed on this file".into()))
 }
 
 /// Offline or recall-on-access files (cloud placeholders) would be downloaded by reading them.
@@ -1033,6 +1041,15 @@ mod tests {
         assert!(matches!(Preview::load(&huge, false).content, Content::Message(m) if m.starts_with("Cannot show image")));
         fs::remove_file(broken).unwrap();
         fs::remove_file(huge).unwrap();
+    }
+
+    /// A decoder panic on a malformed image used to end the preview thread (or, with
+    /// `panic = "abort"`, the app); it is now an error shown in the pane.
+    #[test]
+    fn image_decoder_panics_become_errors() {
+        let result: Result<(), String> = catch_decoder_panic(|| panic!("malformed chunk"));
+        assert_eq!(result.unwrap_err(), "the image decoder failed on this file");
+        assert_eq!(catch_decoder_panic(|| Ok::<_, String>(7)), Ok(7));
     }
 
     /// MIN-01: a big folder keeps only `DIR_LIMIT` entries (still in display order) and the
