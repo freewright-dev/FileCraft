@@ -91,9 +91,16 @@ fn send_error(conn: &mut impl Write, message: &str) -> io::Result<()> {
     conn.write_all(bytes)
 }
 
-/// The window's side of one request.
-fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize, total: &AtomicUsize) -> anyhow::Result<VolumeIndex> {
-    anyhow::ensure!(letter.is_ascii_uppercase(), "bad drive letter");
+/// What the helper answered to one request. Both leave the pipe in step for the next request.
+enum Reply {
+    /// The serialized index, not yet checked.
+    Index(Vec<u8>),
+    /// The helper's reader failed with this message.
+    Failed(String),
+}
+
+/// The window's side of one request. Any error means the pipe is out of step (or broken).
+fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize, total: &AtomicUsize) -> anyhow::Result<Reply> {
     conn.write_all(&[b'R', letter as u8])?;
     conn.flush()?;
     loop {
@@ -110,7 +117,7 @@ fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize,
                 let mut data = Vec::new();
                 conn.take(len).read_to_end(&mut data)?;
                 anyhow::ensure!(data.len() as u64 == len, "the NTFS helper's index was cut short");
-                return Ok(VolumeIndex::from_bytes(&data, letter)?);
+                return Ok(Reply::Index(data));
             }
             b'E' => {
                 let mut len = [0u8; 4];
@@ -119,7 +126,7 @@ fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize,
                 anyhow::ensure!(len <= MAX_ERROR_BYTES, "bad message from the NTFS helper");
                 let mut msg = vec![0u8; len as usize];
                 conn.read_exact(&mut msg)?;
-                anyhow::bail!("{}", String::from_utf8_lossy(&msg));
+                return Ok(Reply::Failed(String::from_utf8_lossy(&msg).into_owned()));
             }
             _ => anyhow::bail!("bad message from the NTFS helper"),
         }
@@ -149,17 +156,20 @@ impl MftHelper {
 
     /// Reads drive `letter`'s master file table in the helper.
     pub fn read_volume(&self, letter: char, progress: &AtomicUsize, total: &AtomicUsize) -> anyhow::Result<VolumeIndex> {
+        anyhow::ensure!(letter.is_ascii_uppercase(), "bad drive letter");
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let Some(pipe) = conn.as_mut() else { anyhow::bail!("the NTFS helper has stopped") };
-        let result = request(pipe, letter, progress, total);
-        // An I/O or protocol failure leaves the pipe out of step; a reader error does not.
-        if let Err(e) = &result
-            && (e.downcast_ref::<io::Error>().is_some() || e.to_string().starts_with("bad message"))
-        {
-            *conn = None;
-            self.alive.store(false, Ordering::Relaxed);
+        // Only a failed exchange leaves the pipe out of step. A reader error or an index that
+        // fails the checks below arrived whole, so the helper stays usable.
+        match request(pipe, letter, progress, total) {
+            Ok(Reply::Index(data)) => Ok(VolumeIndex::from_bytes(&data, letter)?),
+            Ok(Reply::Failed(message)) => anyhow::bail!("{message}"),
+            Err(e) => {
+                *conn = None;
+                self.alive.store(false, Ordering::Relaxed);
+                Err(e)
+            }
         }
-        result
     }
 
     /// Starts the helper elevated (UAC prompt) and waits until it has connected. Blocks, so
@@ -361,6 +371,23 @@ mod tests {
         let err = window.read_volume('D', &progress, &total).err().expect("drive D: must fail");
         assert!(err.to_string().contains("no NTFS volume D:"), "{err}");
         assert!(window.is_alive(), "a reader error keeps the helper");
+
+        drop(window);
+        helper.join().unwrap().unwrap();
+    }
+
+    /// An index that fails the cache checks arrived whole, so the helper stays in use. It was
+    /// dropped before (the check fails with an `io::Error`), which turned fast indexing off and
+    /// needed another UAC prompt.
+    #[test]
+    fn a_rejected_index_keeps_the_helper() {
+        // Always drive C:'s index, so a request for D: gets an index for another drive.
+        let (window, helper) = connect("d4", |_, _, _| Ok(sample()));
+        let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let err = window.read_volume('D', &progress, &total).err().expect("an index for C: must be rejected");
+        assert!(err.to_string().contains("another drive"), "{err}");
+        assert!(window.is_alive(), "a rejected index keeps the helper");
+        assert_eq!(window.read_volume('C', &progress, &total).unwrap().len(), sample().len());
 
         drop(window);
         helper.join().unwrap().unwrap();

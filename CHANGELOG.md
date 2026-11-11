@@ -125,6 +125,10 @@ All notable changes to this project are documented here. The format follows
   whether the helper was still running every frame, and that question waited until the whole
   master file table had been read and sent, so the window froze ("Not Responding") and the
   progress percentage never showed. The answer is now kept apart from the running request.
+- An index from the NTFS helper that fails the cache checks no longer turns fast indexing off. The
+  helper was dropped as if the connection had broken, so every later drive used the folder scan
+  until fast indexing was started again with another UAC prompt. Only a broken or garbled
+  exchange stops using the helper now; the rejected drive alone falls back to the folder scan.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
