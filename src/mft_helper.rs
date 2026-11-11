@@ -18,8 +18,8 @@
 use crate::index::VolumeIndex;
 use std::io::{self, Read, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Command-line switch that runs the helper instead of the window.
 pub const HELPER_ARG: &str = "--mft-helper";
@@ -143,17 +143,82 @@ fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize,
 
 // ─── The window's side ──────────────────────────────────────────────────────
 
+/// Longest silence from the helper during a request. While it reads it sends progress every
+/// [`PROGRESS_EVERY`], so this passes only when it hangs (a stuck disk, or a stuck helper).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The window's end of the pipe during one request: notes when the helper last sent something
+/// and fails every read once the watchdog has given up on it.
+struct Watched<'a> {
+    pipe: &'a mut std::fs::File,
+    start: Instant,
+    /// Milliseconds after `start` when bytes last arrived.
+    heard: &'a AtomicU64,
+    timed_out: &'a AtomicBool,
+}
+
+impl Read for Watched<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.timed_out.load(Ordering::Relaxed) {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let n = self.pipe.read(buf)?;
+        self.heard.store(self.start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+impl Write for Watched<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pipe.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.pipe.flush()
+    }
+}
+
+/// Runs until `done` closes. Once nothing has been `heard` for `idle`, marks the request as
+/// `timed_out` and keeps calling `interrupt`: a read can start just after an interruption.
+fn watchdog(done: std::sync::mpsc::Receiver<()>, idle: Duration, start: Instant, heard: &AtomicU64, timed_out: &AtomicBool, interrupt: impl Fn()) {
+    let poll = (idle / 4).min(Duration::from_secs(1));
+    while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = done.recv_timeout(poll) {
+        let silent = start.elapsed().saturating_sub(Duration::from_millis(heard.load(Ordering::Relaxed)));
+        if silent > idle || timed_out.load(Ordering::Relaxed) {
+            timed_out.store(true, Ordering::Relaxed);
+            interrupt();
+        }
+    }
+}
+
+/// A function that aborts the I/O blocked on `pipe`, from any thread.
+#[cfg(windows)]
+fn interrupter(pipe: &std::fs::File) -> impl Fn() + Send + use<> {
+    use std::os::windows::io::AsRawHandle;
+    let handle = pipe.as_raw_handle() as usize;
+    move || {
+        // SAFETY: only called while `read_volume` holds the pipe open; a handle without
+        // pending I/O is left as it is.
+        unsafe { windows_sys::Win32::System::IO::CancelIoEx(handle as _, std::ptr::null()) };
+    }
+}
+
+#[cfg(not(windows))]
+fn interrupter(_: &std::fs::File) -> impl Fn() + Send + use<> {
+    || {}
+}
+
 /// A running helper, reached through its pipe. Requests are served one at a time.
 pub struct MftHelper {
     conn: Mutex<Option<std::fs::File>>,
     /// Cleared when the pipe is dropped. Kept outside `conn`, whose lock is held for a whole
     /// request, so the UI can ask without waiting for a drive to be read.
     alive: AtomicBool,
+    idle_timeout: Duration,
 }
 
 impl MftHelper {
     fn new(pipe: std::fs::File) -> MftHelper {
-        MftHelper { conn: Mutex::new(Some(pipe)), alive: AtomicBool::new(true) }
+        MftHelper { conn: Mutex::new(Some(pipe)), alive: AtomicBool::new(true), idle_timeout: IDLE_TIMEOUT }
     }
 
     /// Whether the helper still answers (it is dropped after the first broken exchange).
@@ -163,20 +228,34 @@ impl MftHelper {
     }
 
     /// Reads drive `letter`'s master file table in the helper. Requests wait for each other;
-    /// one whose job was `cancel`led while it waited is not sent.
+    /// one whose job was `cancel`led while it waited is not sent. A helper that stays silent
+    /// for [`IDLE_TIMEOUT`] is given up on.
     pub fn read_volume(&self, letter: char, progress: &AtomicUsize, total: &AtomicUsize, cancel: &AtomicBool) -> anyhow::Result<VolumeIndex> {
         anyhow::ensure!(letter.is_ascii_uppercase(), "bad drive letter");
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
         let Some(pipe) = conn.as_mut() else { anyhow::bail!("the NTFS helper has stopped") };
+        let (start, heard, timed_out) = (Instant::now(), AtomicU64::new(0), AtomicBool::new(false));
+        let interrupt = interrupter(pipe);
+        let reply = std::thread::scope(|s| {
+            let (done, done_rx) = std::sync::mpsc::channel::<()>();
+            let (heard, timed_out, idle) = (&heard, &timed_out, self.idle_timeout);
+            s.spawn(move || watchdog(done_rx, idle, start, heard, timed_out, interrupt));
+            let reply = request(&mut Watched { pipe, start, heard, timed_out }, letter, progress, total);
+            drop(done);
+            reply
+        });
         // Only a failed exchange leaves the pipe out of step. A reader error or an index that
         // fails the checks below arrived whole, so the helper stays usable.
-        match request(pipe, letter, progress, total) {
+        match reply {
             Ok(Reply::Index(data)) => Ok(VolumeIndex::from_bytes(&data, letter)?),
             Ok(Reply::Failed(message)) => anyhow::bail!("{message}"),
             Err(e) => {
                 *conn = None;
                 self.alive.store(false, Ordering::Relaxed);
+                if timed_out.load(Ordering::Relaxed) {
+                    anyhow::bail!("the NTFS helper stopped answering");
+                }
                 Err(e)
             }
         }
@@ -495,6 +574,36 @@ mod tests {
         let err = serve(&mut GoneWindow(io::Cursor::new(b"RC".to_vec())), &read).expect_err("the window is gone");
         assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
         assert!(start.elapsed() < Duration::from_secs(5), "the reader ran on for {:?}", start.elapsed());
+    }
+
+    /// A helper that takes a request and then says nothing is given up on after the idle
+    /// timeout. The window used to wait on the pipe forever, and with it every later drive.
+    #[test]
+    fn a_silent_helper_times_out() {
+        let name = pipe_name("f6");
+        let server = win::create_server(&name).unwrap();
+        let release = std::sync::Arc::new(AtomicBool::new(false));
+        let hung = std::sync::Arc::clone(&release);
+        let helper = std::thread::spawn(move || {
+            let mut conn = open_client(&name).unwrap();
+            assert_eq!(read_request(&mut conn).unwrap(), Some('C'));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !hung.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
+        let mut window = MftHelper::new(std::fs::File::from(server));
+        window.idle_timeout = Duration::from_millis(300);
+
+        let start = Instant::now();
+        let err = window.read_volume('C', &AtomicUsize::new(0), &AtomicUsize::new(0), &GO).err();
+        let waited = start.elapsed();
+        release.store(true, Ordering::Relaxed);
+        helper.join().unwrap();
+        assert!(waited < Duration::from_secs(5), "waited {waited:?} for a silent helper");
+        assert_eq!(err.map(|e| e.to_string()).as_deref(), Some("the NTFS helper stopped answering"));
+        assert!(!window.is_alive());
     }
 
     /// A second server under the same name is refused, so no other program can stand in for

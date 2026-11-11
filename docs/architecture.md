@@ -84,7 +84,9 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
     exits when the pipe closes. A progress message that cannot be sent cancels the read in
     progress.
   - **Check.** The window parses what it receives with `VolumeIndex::from_bytes`, which applies
-    every check a cache file gets. NTFS drives are therefore read one after another.
+    every check a cache file gets. NTFS drives are therefore read one after another. A request
+    that hears nothing from the helper for two minutes (progress arrives every 150 ms) is
+    aborted with `CancelIoEx` and the helper is no longer used.
 
 ## Cache format
 
