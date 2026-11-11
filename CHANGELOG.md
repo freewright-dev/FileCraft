@@ -164,6 +164,9 @@ All notable changes to this project are documented here. The format follows
 - Turning quick search off or exiting releases the hotkey explicitly, before removing the
   notification area icon. It was left to window teardown, after the icon, so if Explorer was slow
   to respond, turning quick search back on could report the hotkey as taken by FileCraft itself.
+- Leaving the hotkey field in Settings without changing the hotkey no longer registers it again.
+  Each time the field lost focus the hotkey was briefly released and re-registered, so a press at
+  that moment was lost. A hotkey that failed to register is still retried.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
