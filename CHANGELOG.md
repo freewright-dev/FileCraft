@@ -133,6 +133,9 @@ All notable changes to this project are documented here. The format follows
   every superseded job. A cancelled job still asked the helper to read its drive once the pipe was
   free and only then dropped the result, so pressing F5 a few times kept the helper (and the
   spinner) busy for several complete reads. A job cancelled while it waits is no longer sent.
+- The elevated NTFS helper stops reading a drive as soon as FileCraft stops listening (closed or
+  gave up on the request). It used to read the whole master file table to the end first, so an
+  elevated process kept loading the disk after the window had gone.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
