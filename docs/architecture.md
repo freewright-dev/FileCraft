@@ -81,7 +81,8 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
     `SECURITY_IDENTIFICATION`, so whoever serves the pipe cannot impersonate its elevated token.
   - **Serve.** It answers one request at a time ("index drive X") with progress messages and
     the index in the cache format. It writes no files, reads no settings, starts nothing, and
-    exits when the pipe closes.
+    exits when the pipe closes. A progress message that cannot be sent cancels the read in
+    progress.
   - **Check.** The window parses what it receives with `VolumeIndex::from_bytes`, which applies
     every check a cache file gets. NTFS drives are therefore read one after another.
 

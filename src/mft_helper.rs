@@ -29,7 +29,7 @@ const MAX_ERROR_BYTES: u32 = 64 * 1024;
 const MAX_INDEX_BYTES: u64 = 4 << 30;
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 
-type ReadVolume<'a> = dyn Fn(char, &AtomicUsize, &AtomicUsize) -> anyhow::Result<VolumeIndex> + Sync + 'a;
+type ReadVolume<'a> = dyn Fn(char, &AtomicUsize, &AtomicUsize, &AtomicBool) -> anyhow::Result<VolumeIndex> + Sync + 'a;
 
 // ─── Protocol ───────────────────────────────────────────────────────────────
 
@@ -56,14 +56,15 @@ fn read_request(r: &mut impl Read) -> io::Result<Option<char>> {
 /// The helper's side: answers requests until the window closes the pipe.
 fn serve(conn: &mut (impl Read + Write), read_volume: &ReadVolume) -> io::Result<()> {
     while let Some(letter) = read_request(conn)? {
-        let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let (progress, total, cancel) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicBool::new(false));
         let result = std::thread::scope(|s| -> io::Result<_> {
-            let job = s.spawn(|| read_volume(letter, &progress, &total));
+            let job = s.spawn(|| read_volume(letter, &progress, &total, &cancel));
             while !job.is_finished() {
-                conn.write_all(b"P")?;
-                conn.write_all(&(progress.load(Ordering::Relaxed) as u64).to_le_bytes())?;
-                conn.write_all(&(total.load(Ordering::Relaxed) as u64).to_le_bytes())?;
-                conn.flush()?;
+                if let Err(e) = send_progress(conn, &progress, &total) {
+                    // The window is gone: stop reading the volume rather than finish for nobody.
+                    cancel.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
                 std::thread::sleep(PROGRESS_EVERY);
             }
             Ok(job.join())
@@ -82,6 +83,13 @@ fn serve(conn: &mut (impl Read + Write), read_volume: &ReadVolume) -> io::Result
         conn.flush()?;
     }
     Ok(())
+}
+
+fn send_progress(conn: &mut impl Write, progress: &AtomicUsize, total: &AtomicUsize) -> io::Result<()> {
+    conn.write_all(b"P")?;
+    conn.write_all(&(progress.load(Ordering::Relaxed) as u64).to_le_bytes())?;
+    conn.write_all(&(total.load(Ordering::Relaxed) as u64).to_le_bytes())?;
+    conn.flush()
 }
 
 fn send_error(conn: &mut impl Write, message: &str) -> io::Result<()> {
@@ -201,10 +209,7 @@ impl MftHelper {
 pub fn run_helper(pipe: &std::ffi::OsStr) -> i32 {
     let Some(name) = pipe.to_str().filter(|n| valid_pipe_name(n)) else { return 2 };
     let Ok(mut conn) = open_client(name) else { return 3 };
-    let read = |letter, progress: &AtomicUsize, total: &AtomicUsize| {
-        crate::mft::read_volume(letter, progress, total, &std::sync::atomic::AtomicBool::new(false))
-    };
-    match serve(&mut conn, &read) {
+    match serve(&mut conn, &crate::mft::read_volume) {
         Ok(()) => 0,
         Err(_) => 1,
     }
@@ -350,6 +355,7 @@ mod tests {
     ) -> (MftHelper, std::thread::JoinHandle<io::Result<()>>) {
         let name = pipe_name(label);
         let server = win::create_server(&name).unwrap();
+        let read = move |letter, progress: &AtomicUsize, total: &AtomicUsize, _: &AtomicBool| read(letter, progress, total);
         let helper = std::thread::spawn(move || serve(&mut open_client(&name).unwrap(), &read));
         win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
         (MftHelper::new(std::fs::File::from(server)), helper)
@@ -453,6 +459,42 @@ mod tests {
         probe.join().unwrap().unwrap();
         drop(window);
         helper.join().unwrap().unwrap();
+    }
+
+    /// A request whose window has gone: the request arrived, then every write fails.
+    struct GoneWindow(io::Cursor<Vec<u8>>);
+
+    impl Read for GoneWindow {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Write for GoneWindow {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// When the window stops listening, the helper cancels the read instead of scanning the
+    /// volume to the end for nobody. The reader was given a flag that could never be set.
+    #[test]
+    fn the_helper_stops_reading_when_the_window_is_gone() {
+        let read = |_: char, _: &AtomicUsize, _: &AtomicUsize, cancel: &AtomicBool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !cancel.load(Ordering::Relaxed) {
+                anyhow::ensure!(std::time::Instant::now() < deadline, "never cancelled");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            anyhow::bail!("cancelled")
+        };
+        let start = std::time::Instant::now();
+        let err = serve(&mut GoneWindow(io::Cursor::new(b"RC".to_vec())), &read).expect_err("the window is gone");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert!(start.elapsed() < Duration::from_secs(5), "the reader ran on for {:?}", start.elapsed());
     }
 
     /// A second server under the same name is refused, so no other program can stand in for
