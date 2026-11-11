@@ -135,7 +135,12 @@ fn read_one_dir(
             shared.skipped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
+        // A name that is not valid Unicode (an NTFS name with an unpaired surrogate) cannot be
+        // stored exactly: it is indexed as `?`, as the NTFS index does, counted as skipped, and a
+        // folder with such a name is not entered because its children's paths would be wrong.
+        let file_name = entry.file_name();
+        let lossy = file_name.to_str().is_none();
+        let name = if lossy { "?".to_owned() } else { file_name.to_string_lossy().into_owned() };
         // On Windows this metadata comes from the directory listing itself (no extra syscall).
         let Ok(meta) = entry.metadata() else {
             shared.skipped.fetch_add(1, Ordering::Relaxed);
@@ -146,7 +151,10 @@ fn read_one_dir(
             shared.out_of_ids.store(true, Ordering::Relaxed);
             break;
         };
-        if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
+        if lossy {
+            shared.skipped.fetch_add(1, Ordering::Relaxed);
+        }
+        if !lossy && attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
             shared.pending.fetch_add(1, Ordering::AcqRel);
             let job = (entry.path(), idx);
             if work_tx.len() < SHARED_QUEUE_LIMIT {
@@ -303,6 +311,38 @@ mod tests {
             assert_eq!(next_entry_id(&next), None);
         }
         assert_eq!(next.load(Ordering::Relaxed), NONE);
+    }
+
+    /// A name with an unpaired surrogate used to be stored with U+FFFD, a name that does not
+    /// denote the file, and its folder was walked under that wrong path. It is now stored as `?`,
+    /// counted as skipped, and the folder is not entered.
+    #[cfg(windows)]
+    #[test]
+    fn invalid_unicode_names_are_counted_and_not_entered() {
+        use std::os::windows::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!("filecraft-walk-lossy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bad = dir.join(std::ffi::OsString::from_wide(&[0x61, 0xD800]));
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("inner.txt"), "").unwrap();
+        let skipped = AtomicUsize::new(0);
+        let (tx, rx) = unbounded();
+        let shared = Shared {
+            next_id: AtomicU32::new(1),
+            out_of_ids: AtomicBool::new(false),
+            pending: AtomicUsize::new(1),
+            skipped: &skipped,
+            cancel: &AtomicBool::new(false),
+        };
+        let (out_tx, out_rx) = unbounded();
+        read_one_dir(&dir, 0, &shared, &mut Vec::new(), &tx, &out_tx);
+        drop(out_tx);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let names: Vec<String> = out_rx.iter().flatten().map(|r| r.name).collect();
+        assert_eq!(names, ["?"]);
+        assert_eq!(skipped.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_err());
     }
 
     /// MIN-02: unreadable folders are counted instead of silently missing.
