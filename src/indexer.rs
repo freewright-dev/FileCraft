@@ -230,7 +230,12 @@ impl Job {
         let skipped = AtomicUsize::new(0);
         let mut result = match (use_mft, helper) {
             (false, _) => Err(anyhow::anyhow!("no administrator rights")),
-            (true, _) if self.elevated => mft::read_volume(letter, &self.progress, &self.total, &self.cancel),
+            // A panic in the reader (a parser bug on a volume it misreads) falls back to the
+            // folder scan instead of ending the indexing thread with the drive left waiting.
+            (true, _) if self.elevated => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                mft::read_volume(letter, &self.progress, &self.total, &self.cancel)
+            }))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the NTFS reader panicked"))),
             // The helper cannot be interrupted once it reads; a job cancelled while it waited
             // for the pipe is not sent, and one cancelled later just drops its result.
             (true, Some(h)) => h.read_volume(letter, &self.progress, &self.total, &self.cancel).and_then(|v| {

@@ -56,7 +56,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
 
 # Indexing and searching millions of entries is unbearably slow without optimizations.
 [profile.dev.package."*"]
