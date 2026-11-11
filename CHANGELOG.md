@@ -136,6 +136,11 @@ All notable changes to this project are documented here. The format follows
 - The elevated NTFS helper stops reading a drive as soon as FileCraft stops listening (closed or
   gave up on the request). It used to read the whole master file table to the end first, so an
   elevated process kept loading the disk after the window had gone.
+- A hung NTFS helper no longer stalls indexing for the rest of the session. FileCraft waited for
+  its answer without a time limit, so a helper stuck on a failing disk kept that drive, and every
+  NTFS drive queued behind it, indexing forever. The helper reports progress several times a
+  second while it reads; after two minutes without a word FileCraft stops using it, and the drive
+  falls back to the folder scan.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
