@@ -134,8 +134,8 @@ order).
 The `Searcher` runs on a background thread. Every keystroke submits a request with a new
 generation number; running searches check it periodically and abandon stale work, and only the
 newest result is shown. Each response carries the `Index` snapshot its hits refer to, so the UI
-never mixes ids from different snapshots. The unfiltered list for each sort order is cached per
-snapshot, so clearing the query is instant.
+never mixes ids from different snapshots. The unfiltered lists of the last two sort orders used
+are cached per snapshot, so clearing the query is instant.
 
 ## UI
 
