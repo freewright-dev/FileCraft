@@ -151,7 +151,8 @@ impl Query {
                 .split_once(':')
                 .is_some_and(|(p, _)| FUNCTION_PREFIXES.contains(&p.to_ascii_lowercase().as_str()));
             let alts = if quoted && !function_prefix {
-                vec![text_test(&body, opts.match_path, case)]
+                // As for unquoted text, a `/` stands for `\` and makes the term a path term.
+                vec![text_test(&body.replace('/', "\\"), opts.match_path, case)]
             } else {
                 parse_term(&body, opts, case)?
             };
@@ -920,6 +921,15 @@ mod tests {
         assert_eq!(names("\"!me\""), Vec::<String>::new());
         assert_eq!(names("\"folder:oc\""), Vec::<String>::new());
         assert_eq!(names("\"*.rs\""), Vec::<String>::new());
+    }
+
+    /// A quoted `/` is a path separator like an unquoted one: `"src/main"` found nothing because
+    /// only unquoted terms had their `/` turned into `\`.
+    #[test]
+    fn quoted_terms_match_paths_with_slashes() {
+        assert_eq!(names("\"src/main\""), ["main.rs"]);
+        assert_eq!(names("\"c:/src/\""), names("c:/src/"));
+        assert_eq!(names("!\"docs/\""), names("!docs\\"));
     }
 
     #[test]
