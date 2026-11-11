@@ -152,6 +152,10 @@ All notable changes to this project are documented here. The format follows
   the run, before its declared size (at most 16 MB) was checked, and sparse runs had no length
   limit, so their byte counts could wrap. Only the bytes the list declares are read now, and a
   sparse run longer than the volume fails closed like other invalid runs.
+- Reading a large master file table on a machine short of memory falls back to the folder scan
+  instead of crashing. Its record state (up to about 3.7 GB below the 64 Mi record cap) was
+  allocated in a way that ends the process when the memory is not there, so the documented
+  fallback never ran.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
