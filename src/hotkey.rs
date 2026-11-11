@@ -508,6 +508,9 @@ mod platform {
                 };
                 // SAFETY: the name is NUL-terminated and outlives the call.
                 let taskbar_created = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+                // The app only notices that the thread has ended when it next runs its logic, which
+                // a hidden window does not do unless asked to.
+                let wake = ctx.clone();
                 let state = State {
                     ctx,
                     events: events_tx,
@@ -535,6 +538,7 @@ mod platform {
                 }
                 STATE.set(None);
                 let _ = stopped_tx.send(());
+                wake.request_repaint();
             })?;
             let hwnd = started.recv().map_err(|_| io::Error::other("the hotkey thread stopped"))??;
             Ok(Background { hwnd, next_hotkey, events, stopped })
