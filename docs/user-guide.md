@@ -39,6 +39,9 @@ an option yourself in the meantime.
 | `Ctrl+Shift+C` | Copy the full path |
 | `Esc`, the hotkey, or clicking elsewhere | Close the bar |
 
+Opening or showing a result in Explorer closes the bar at once. If Windows then fails to open it,
+the main window's status bar says why.
+
 While quick search is on, FileCraft keeps running in the notification area: closing the window only
 hides it, and the indexes stay in memory. Click the icon or start FileCraft again to bring the
 window back, and right-click the icon or use **File → Exit** to quit. The first time you close the

@@ -176,11 +176,19 @@ pub struct QuickBar {
     was_focused: bool,
     /// Where "show in FileCraft" sends the query.
     to_main: Sender<String>,
+    /// Where Open and Show in folder report failures that come after the bar closed: the main
+    /// window's status bar.
+    shell_errors: std::sync::mpsc::Sender<String>,
     last_height: f32,
 }
 
 impl QuickBar {
-    pub fn new(ctx: egui::Context, signals: Arc<BarSignals>, to_main: Sender<String>) -> Self {
+    pub fn new(
+        ctx: egui::Context,
+        signals: Arc<BarSignals>,
+        to_main: Sender<String>,
+        shell_errors: std::sync::mpsc::Sender<String>,
+    ) -> Self {
         let repaint = ctx.clone();
         QuickBar {
             ctx,
@@ -204,6 +212,7 @@ impl QuickBar {
             take_foreground: false,
             was_focused: false,
             to_main,
+            shell_errors,
             last_height: height(0, false),
         }
     }
@@ -281,8 +290,23 @@ impl QuickBar {
             _ if win32_alias(&full) => Err(std::io::Error::other(
                 "the name ends in a dot or space or is a device name, so Windows would open a different item",
             )),
-            Activate::Open => actions::open(&PathBuf::from(&full)),
-            Activate::Reveal => actions::reveal(&PathBuf::from(&full)),
+            // The shell can block for seconds (slow share, placeholder, handler load), and this
+            // runs on the UI thread, so the launch goes to a worker and the bar closes at once.
+            Activate::Open | Activate::Reveal => {
+                let path = PathBuf::from(&full);
+                let reveal = matches!(action, Activate::Reveal);
+                let errors = self.shell_errors.clone();
+                let main = self.ctx.clone();
+                actions::in_background(
+                    move || if reveal { actions::reveal(&path) } else { actions::open(&path) },
+                    move |result| {
+                        if let Err(e) = result {
+                            let _ = errors.send(e.to_string());
+                            main.request_repaint();
+                        }
+                    },
+                )
+            }
         };
         match result {
             Ok(()) => self.close(),
