@@ -154,10 +154,12 @@ impl MftHelper {
         self.alive.load(Ordering::Relaxed)
     }
 
-    /// Reads drive `letter`'s master file table in the helper.
-    pub fn read_volume(&self, letter: char, progress: &AtomicUsize, total: &AtomicUsize) -> anyhow::Result<VolumeIndex> {
+    /// Reads drive `letter`'s master file table in the helper. Requests wait for each other;
+    /// one whose job was `cancel`led while it waited is not sent.
+    pub fn read_volume(&self, letter: char, progress: &AtomicUsize, total: &AtomicUsize, cancel: &AtomicBool) -> anyhow::Result<VolumeIndex> {
         anyhow::ensure!(letter.is_ascii_uppercase(), "bad drive letter");
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
         let Some(pipe) = conn.as_mut() else { anyhow::bail!("the NTFS helper has stopped") };
         // Only a failed exchange leaves the pipe out of step. A reader error or an index that
         // fails the checks below arrived whole, so the helper stays usable.
@@ -334,6 +336,9 @@ mod tests {
     use super::*;
     use crate::index::tests::sample;
 
+    /// A job that was never cancelled.
+    static GO: AtomicBool = AtomicBool::new(false);
+
     fn pipe_name(label: &str) -> String {
         format!("{PIPE_PREFIX}{}-{label}", std::process::id())
     }
@@ -364,11 +369,11 @@ mod tests {
         });
 
         let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let v = window.read_volume('C', &progress, &total).unwrap();
+        let v = window.read_volume('C', &progress, &total, &GO).unwrap();
         assert_eq!(v.len(), sample().len());
         assert_eq!(total.load(Ordering::Relaxed), 10);
 
-        let err = window.read_volume('D', &progress, &total).err().expect("drive D: must fail");
+        let err = window.read_volume('D', &progress, &total, &GO).err().expect("drive D: must fail");
         assert!(err.to_string().contains("no NTFS volume D:"), "{err}");
         assert!(window.is_alive(), "a reader error keeps the helper");
 
@@ -384,10 +389,31 @@ mod tests {
         // Always drive C:'s index, so a request for D: gets an index for another drive.
         let (window, helper) = connect("d4", |_, _, _| Ok(sample()));
         let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let err = window.read_volume('D', &progress, &total).err().expect("an index for C: must be rejected");
+        let err = window.read_volume('D', &progress, &total, &GO).err().expect("an index for C: must be rejected");
         assert!(err.to_string().contains("another drive"), "{err}");
         assert!(window.is_alive(), "a rejected index keeps the helper");
-        assert_eq!(window.read_volume('C', &progress, &total).unwrap().len(), sample().len());
+        assert_eq!(window.read_volume('C', &progress, &total, &GO).unwrap().len(), sample().len());
+
+        drop(window);
+        helper.join().unwrap().unwrap();
+    }
+
+    /// A job cancelled while it waited for the pipe does not ask the helper to read the drive.
+    /// The flag used to be checked only after the whole read had been sent back.
+    #[test]
+    fn cancelled_requests_are_not_sent() {
+        let reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&reads);
+        let (window, helper) = connect("e5", move |_, _, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok(sample())
+        });
+        let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let err = window.read_volume('C', &progress, &total, &AtomicBool::new(true)).err().expect("a cancelled job must fail");
+        assert_eq!(err.to_string(), "cancelled");
+        assert!(window.is_alive());
+        assert_eq!(window.read_volume('C', &progress, &total, &GO).unwrap().len(), sample().len());
+        assert_eq!(reads.load(Ordering::Relaxed), 1, "only the second request reached the helper");
 
         drop(window);
         helper.join().unwrap().unwrap();
@@ -410,7 +436,7 @@ mod tests {
         let total = std::sync::Arc::new(AtomicUsize::new(0));
         let request = {
             let (window, total) = (std::sync::Arc::clone(&window), std::sync::Arc::clone(&total));
-            std::thread::spawn(move || window.read_volume('C', &AtomicUsize::new(0), &total).map(|v| v.len()))
+            std::thread::spawn(move || window.read_volume('C', &AtomicUsize::new(0), &total, &GO).map(|v| v.len()))
         };
         // The first progress message: the request is under way and holds the pipe.
         while total.load(Ordering::Relaxed) == 0 {

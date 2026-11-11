@@ -129,6 +129,10 @@ All notable changes to this project are documented here. The format follows
   helper was dropped as if the connection had broken, so every later drive used the folder scan
   until fast indexing was started again with another UAC prompt. Only a broken or garbled
   exchange stops using the helper now; the rejected drive alone falls back to the folder scan.
+- Re-indexing while the NTFS helper is busy no longer queues a full master file table read for
+  every superseded job. A cancelled job still asked the helper to read its drive once the pipe was
+  free and only then dropped the result, so pressing F5 a few times kept the helper (and the
+  spinner) busy for several complete reads. A job cancelled while it waits is no longer sent.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
