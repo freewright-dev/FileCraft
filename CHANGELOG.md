@@ -39,13 +39,16 @@ All notable changes to this project are documented here. The format follows
 - Quick search bar: a system-wide hotkey (default Alt+Space, configurable in Settings) opens a small
   always-on-top search box that ranks programs and close name matches first. Enter opens the
   result, Ctrl+Enter shows it in its folder, Shift+Enter shows all results in the main window.
-- Notification area icon. With quick search on (the default), closing the window keeps FileCraft
-  running there, **Exit** quits, and starting FileCraft again shows the running instance. The first
-  close explains this once and offers to exit instead.
+- Notification area icon while quick search is on: clicking it shows the window, and its menu
+  offers Open FileCraft, Quick search and Exit. Starting FileCraft again shows the running instance.
 
 ### Changed
 
 - README: removed the Freewright and Discord links.
+- With quick search on (the default), closing the window no longer exits FileCraft: it keeps
+  running in the notification area so that the hotkey keeps working. **Exit** (in the File menu or
+  the icon's menu) quits, and turning quick search off in Settings restores the old behaviour. The
+  first close explains this once and offers to exit instead.
 
 ### Fixed
 
