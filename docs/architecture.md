@@ -148,10 +148,12 @@ repaint is requested. So everything that has to continue then (closing, the inde
 the background thread) lives in `logic`, and these two parts work without the window:
 
 - **Background thread** (`hotkey.rs`) — owns a hidden top-level window with the `RegisterHotKey`
-  hotkey and the tray icon, and runs its message loop. On the hotkey it places and shows the bar
-  itself: the process that receives a hotkey may take the foreground, and the bar appears without
-  waiting for the throttled repaint of a hidden main window. The window class also identifies a
-  running instance, which a second start asks to show its window before exiting.
+  hotkey and the tray icon, and runs its message loop. On the hotkey it places the bar and queues
+  showing it, so the bar appears without waiting for the throttled repaint of a hidden main window.
+  The bar then takes the foreground from its own thread once it is visible: the process that
+  receives a hotkey may do that, but a window that is not shown yet cannot take keystrokes. The
+  window class also identifies a running instance, which a second start asks to show its window
+  before exiting.
 - **Bar** (`quick_bar.rs`) — a *deferred* viewport, which renders on its own; an immediate one only
   renders inside its parent's pass, which does not run for a hidden window. Its state is therefore
   behind a mutex, and it has its own `Searcher`. The main window passes it each new index snapshot.
