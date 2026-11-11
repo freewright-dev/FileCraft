@@ -778,14 +778,20 @@ fn load_dir(path: &Path, stale: &dyn Fn() -> bool) -> Content {
     Content::Directory { entries, total }
 }
 
+/// Classic 16-bytes-per-row dump: offset, hex bytes, printable ASCII. Written straight into one
+/// string, without a temporary per byte.
 fn hex_dump(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 4);
+    use std::fmt::Write as _;
+    // Offset (10), 16 hex columns (48), separator (1), ASCII (16) and newline (1).
+    let mut out = String::with_capacity(bytes.len().div_ceil(16) * 76);
     for (row, chunk) in bytes.chunks(16).enumerate() {
-        out.push_str(&format!("{:08x}  ", row * 16));
+        let _ = write!(out, "{:08x}  ", row * 16);
         for b in chunk {
-            out.push_str(&format!("{b:02x} "));
+            let _ = write!(out, "{b:02x} ");
         }
-        out.push_str(&"   ".repeat(16 - chunk.len()));
+        for _ in chunk.len()..16 {
+            out.push_str("   ");
+        }
         out.push(' ');
         out.extend(chunk.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }));
         out.push('\n');
@@ -1142,6 +1148,19 @@ mod tests {
         let p = Preview::load(&img, false);
         assert!(matches!(p.content, Content::Image(_)));
         assert!(!p.can_edit());
+    }
+
+    #[test]
+    fn hex_dump_layout() {
+        let dump = hex_dump(b"0123456789abcdef\x00 ~");
+        let pad = " ".repeat(3 * 13);
+        assert_eq!(
+            dump,
+            format!(
+                "00000000  30 31 32 33 34 35 36 37 38 39 61 62 63 64 65 66  0123456789abcdef\n\
+                 00000010  00 20 7e {pad} . ~\n"
+            )
+        );
     }
 
     /// FC-08: images are read from the local path (no `file://` URI that the loader turned into
