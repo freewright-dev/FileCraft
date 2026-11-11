@@ -501,9 +501,14 @@ mod platform {
             }),
             WM_SHOW_MAIN => with_state(|state| state.send(Event::ShowMain)),
             WM_DESTROY => {
+                // The hotkey goes first and explicitly: removing the icon waits for Explorer, and
+                // a new instance or a restarted thread has to be able to register the hotkey even
+                // if this one is still stuck there when `Background::drop` stops waiting.
                 // SAFETY: `hwnd` is the window being destroyed, which still exists here, and the
-                // data identifies the icon it added.
+                // data identifies the icon it added. Unregistering a hotkey that is not
+                // registered only fails.
                 unsafe {
+                    UnregisterHotKey(hwnd, HOTKEY_ID);
                     Shell_NotifyIconW(NIM_DELETE, &tray_data(hwnd));
                     PostQuitMessage(0);
                 }
