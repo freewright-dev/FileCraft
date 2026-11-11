@@ -254,12 +254,14 @@ mod platform {
         events: Sender<Event>,
         next_hotkey: Arc<Mutex<Option<Hotkey>>>,
         signals: Arc<BarSignals>,
-        taskbar_created: u32,
         registered: Cell<bool>,
     }
 
     thread_local! {
         static STATE: RefCell<Option<Rc<State>>> = const { RefCell::new(None) };
+        /// The `TaskbarCreated` message, apart from the state so that the window procedure can
+        /// check every message for it without taking a reference to the state.
+        static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
     }
 
     /// Runs `f` with the state, holding no borrow of it: Win32 calls made by `f` can re-enter the
@@ -476,8 +478,7 @@ mod platform {
     }
 
     unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        let mut taskbar_created = 0;
-        with_state(|state| taskbar_created = state.taskbar_created);
+        let taskbar_created = TASKBAR_CREATED.get();
         match msg {
             WM_HOTKEY => with_state(|state| state.toggle_bar()),
             // With icon version 4, the low word of `lparam` is the event.
@@ -590,7 +591,7 @@ mod platform {
                     }
                 };
                 // SAFETY: the name is NUL-terminated and outlives the call.
-                let taskbar_created = unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) };
+                TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) });
                 // The app only notices that the thread has ended when it next runs its logic, which
                 // a hidden window does not do unless asked to.
                 let wake = ctx.clone();
@@ -599,7 +600,6 @@ mod platform {
                     events: events_tx,
                     next_hotkey: next_hotkey_thread,
                     signals,
-                    taskbar_created,
                     registered: Cell::new(false),
                 };
                 state.register(hwnd, hotkey);
