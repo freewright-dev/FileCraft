@@ -64,6 +64,10 @@ All notable changes to this project are documented here. The format follows
   every core, so a large drive briefly ran up to four times as many sort threads as cores and
   held four merge buffers at once, multiplied again when several drives finished together. The
   sorts now run one after another.
+- A crafted index cache can no longer make loading run out of memory and crash. Its entry count
+  was bounded only by the 4 GiB file size, so it could declare over 100 million entries, needing
+  more than 12 GiB while loading. Caches with more than 64 Mi entries (the NTFS reader's limit)
+  are now rejected and rebuilt, and the file's bytes are freed before the remaining checks run.
 - Editing a file longer than its preview no longer reads it on the UI thread without a limit.
   The whole file is read on the preview thread, never more than 8 MB, even if it grew after it
   was previewed, and only if it is still a regular file available locally (FC-05).

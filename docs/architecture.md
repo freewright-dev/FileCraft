@@ -100,6 +100,8 @@ Loading reads at most 4 GiB and checks everything
 before the index is used:
 - the drive letter matches the drive being loaded;
 - the source byte and build timestamp are valid;
+- the cache holds at most 64 Mi entries (the NTFS reader's record limit), so a crafted count
+  cannot make loading allocate many times the file's size;
 - every name range lies inside its arena on character boundaries, and every linked entry's name
   is one path component (not empty, `.` or `..`, no `\`, `/`, `:` or NUL; the NTFS reader and
   the folder scan store `?` for names that are not);
@@ -110,6 +112,7 @@ before the index is used:
   rebuild would sort it (the path check recomputes the folder ranks, which sorts only the folders);
 - no bytes are left over.
 
+The file's bytes are freed before the tree and order checks, which build tables of their own.
 A cache that fails any check is ignored and rebuilt; a malformed cache never causes a panic.
 
 ## Searching
