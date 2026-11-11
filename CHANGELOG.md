@@ -121,6 +121,10 @@ All notable changes to this project are documented here. The format follows
   or zero-length runs, runs past the end of the volume) and inconsistent volume geometry, and caps
   the record count at 64 Mi. It falls back to the folder scan instead of reading wrong offsets or
   panicking. Records shorter than the fixed header are skipped instead of read out of bounds (FC-10).
+- The window no longer stops responding while the NTFS helper reads a drive. The status bar asked
+  whether the helper was still running every frame, and that question waited until the whole
+  master file table had been read and sent, so the window froze ("Not Responding") and the
+  progress percentage never showed. The answer is now kept apart from the running request.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.

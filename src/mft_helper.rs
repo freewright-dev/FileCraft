@@ -18,7 +18,7 @@
 use crate::index::VolumeIndex;
 use std::io::{self, Read, Write};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Command-line switch that runs the helper instead of the window.
@@ -131,12 +131,20 @@ fn request(conn: &mut (impl Read + Write), letter: char, progress: &AtomicUsize,
 /// A running helper, reached through its pipe. Requests are served one at a time.
 pub struct MftHelper {
     conn: Mutex<Option<std::fs::File>>,
+    /// Cleared when the pipe is dropped. Kept outside `conn`, whose lock is held for a whole
+    /// request, so the UI can ask without waiting for a drive to be read.
+    alive: AtomicBool,
 }
 
 impl MftHelper {
+    fn new(pipe: std::fs::File) -> MftHelper {
+        MftHelper { conn: Mutex::new(Some(pipe)), alive: AtomicBool::new(true) }
+    }
+
     /// Whether the helper still answers (it is dropped after the first broken exchange).
+    /// Never blocks: the status bar asks every frame.
     pub fn is_alive(&self) -> bool {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// Reads drive `letter`'s master file table in the helper.
@@ -149,6 +157,7 @@ impl MftHelper {
             && (e.downcast_ref::<io::Error>().is_some() || e.to_string().starts_with("bad message"))
         {
             *conn = None;
+            self.alive.store(false, Ordering::Relaxed);
         }
         result
     }
@@ -165,7 +174,7 @@ impl MftHelper {
         let pipe = win::create_server(&name)?;
         let process = win::start_elevated(&format!("{HELPER_ARG} {name}"))?;
         win::wait_connected(&pipe, || win::has_exited(&process), Duration::from_secs(60))?;
-        Ok(MftHelper { conn: Mutex::new(Some(std::fs::File::from(pipe))) })
+        Ok(MftHelper::new(std::fs::File::from(pipe)))
     }
 
     #[cfg(not(windows))]
@@ -319,27 +328,30 @@ mod tests {
         format!("{PIPE_PREFIX}{}-{label}", std::process::id())
     }
 
+    /// Starts `serve` with `read` on a fresh pipe and connects the window's side to it.
+    fn connect(
+        label: &str,
+        read: impl Fn(char, &AtomicUsize, &AtomicUsize) -> anyhow::Result<VolumeIndex> + Send + Sync + 'static,
+    ) -> (MftHelper, std::thread::JoinHandle<io::Result<()>>) {
+        let name = pipe_name(label);
+        let server = win::create_server(&name).unwrap();
+        let helper = std::thread::spawn(move || serve(&mut open_client(&name).unwrap(), &read));
+        win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
+        (MftHelper::new(std::fs::File::from(server)), helper)
+    }
+
     /// The window and helper sides end to end over a real pipe (without elevation): progress,
     /// an index that passes the cache checks, a reader error, and the helper ending when the
     /// window closes the pipe.
     #[test]
     fn window_and_helper_talk_over_a_pipe() {
-        let name = pipe_name("a1");
-        let server = win::create_server(&name).unwrap();
-        let client_name = name.clone();
-        let helper = std::thread::spawn(move || {
-            let mut conn = open_client(&client_name).unwrap();
-            let read = |letter: char, progress: &AtomicUsize, total: &AtomicUsize| {
-                total.store(10, Ordering::Relaxed);
-                progress.store(10, Ordering::Relaxed);
-                std::thread::sleep(Duration::from_millis(200));
-                anyhow::ensure!(letter == 'C', "no NTFS volume {letter}:");
-                Ok(sample())
-            };
-            serve(&mut conn, &read)
+        let (window, helper) = connect("a1", |letter, progress, total| {
+            total.store(10, Ordering::Relaxed);
+            progress.store(10, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(200));
+            anyhow::ensure!(letter == 'C', "no NTFS volume {letter}:");
+            Ok(sample())
         });
-        win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
-        let window = MftHelper { conn: Mutex::new(Some(std::fs::File::from(server))) };
 
         let (progress, total) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let v = window.read_volume('C', &progress, &total).unwrap();
@@ -350,6 +362,42 @@ mod tests {
         assert!(err.to_string().contains("no NTFS volume D:"), "{err}");
         assert!(window.is_alive(), "a reader error keeps the helper");
 
+        drop(window);
+        helper.join().unwrap().unwrap();
+    }
+
+    /// `is_alive` answers while a request holds the pipe. It used to wait for the pipe's lock,
+    /// so the status bar froze the window until every drive had been read.
+    #[test]
+    fn liveness_does_not_wait_for_a_request() {
+        let release = std::sync::Arc::new(AtomicBool::new(false));
+        let reader_release = std::sync::Arc::clone(&release);
+        let (window, helper) = connect("c3", move |_, _, total| {
+            total.store(1, Ordering::Relaxed);
+            while !reader_release.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(sample())
+        });
+        let window = std::sync::Arc::new(window);
+        let total = std::sync::Arc::new(AtomicUsize::new(0));
+        let request = {
+            let (window, total) = (std::sync::Arc::clone(&window), std::sync::Arc::clone(&total));
+            std::thread::spawn(move || window.read_volume('C', &AtomicUsize::new(0), &total).map(|v| v.len()))
+        };
+        // The first progress message: the request is under way and holds the pipe.
+        while total.load(Ordering::Relaxed) == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = std::sync::Arc::clone(&window);
+        let probe = std::thread::spawn(move || tx.send(probe.is_alive()));
+        let answer = rx.recv_timeout(Duration::from_secs(2));
+        release.store(true, Ordering::Relaxed);
+        assert_eq!(answer, Ok(true), "is_alive blocked behind the running request");
+
+        assert_eq!(request.join().unwrap().unwrap(), sample().len());
+        probe.join().unwrap().unwrap();
         drop(window);
         helper.join().unwrap().unwrap();
     }
