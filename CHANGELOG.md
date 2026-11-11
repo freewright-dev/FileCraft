@@ -71,6 +71,8 @@ All notable changes to this project are documented here. The format follows
   was bounded only by the 4 GiB file size, so it could declare over 100 million entries, needing
   more than 12 GiB while loading. Caches with more than 64 Mi entries (the NTFS reader's limit)
   are now rejected and rebuilt, and the file's bytes are freed before the remaining checks run.
+- The index the NTFS helper sends is freed in the same way before its tree and sort orders are
+  checked, instead of staying in memory beside the parsed copy until the checks finish.
 - Date filters such as `dm:2026-01-15` or `dm:>2026-07-01` now start at local midnight of that
   date. They used the UTC offset in effect today, so for a date on the other side of a
   daylight-saving change the day started and ended an hour early or late. `dm:today` also starts

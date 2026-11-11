@@ -248,7 +248,7 @@ impl MftHelper {
         // Only a failed exchange leaves the pipe out of step. A reader error or an index that
         // fails the checks below arrived whole, so the helper stays usable.
         match reply {
-            Ok(Reply::Index(data)) => Ok(VolumeIndex::from_bytes(&data, letter)?),
+            Ok(Reply::Index(data)) => Ok(VolumeIndex::from_bytes(data, letter)?),
             Ok(Reply::Failed(message)) => anyhow::bail!("{message}"),
             Err(e) => {
                 *conn = None;

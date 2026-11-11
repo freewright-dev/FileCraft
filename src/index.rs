@@ -706,9 +706,11 @@ impl VolumeIndex {
         Ok(index)
     }
 
-    /// Parses an index in the cache format with every check [`VolumeIndex::load`] applies.
-    pub fn from_bytes(data: &[u8], letter: char) -> io::Result<VolumeIndex> {
-        let index = Self::parse(data, letter)?;
+    /// Parses an index in the cache format with every check [`VolumeIndex::load`] applies. Takes
+    /// the bytes so it can free them before the tree and order checks, as `load` does.
+    pub fn from_bytes(data: Vec<u8>, letter: char) -> io::Result<VolumeIndex> {
+        let index = Self::parse(&data, letter)?;
+        drop(data);
         index.check()?;
         Ok(index)
     }
