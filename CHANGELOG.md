@@ -273,6 +273,9 @@ All notable changes to this project are documented here. The format follows
   confirmed it, so the program that ran was not bound to the one you had checked, and later
   launches of the same command were never checked again. A confirmed command that now resolves to
   another program is asked about again (FC-18).
+- Show in folder starts `explorer.exe` from the Windows folder. It ran a bare `explorer`, which
+  Windows looks up in FileCraft's own folder first, so an `explorer.exe` placed next to a portable
+  `FileCraft.exe` ran instead.
 - Fast NTFS indexing no longer runs the whole window as administrator (FC-18). **Run as admin**
   restarted FileCraft elevated, so opening files, editing, saving, backups, cache writes and the
   external editor all ran with administrator rights on state that unelevated programs can change.
