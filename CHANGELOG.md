@@ -167,6 +167,11 @@ All notable changes to this project are documented here. The format follows
 - Leaving the hotkey field in Settings without changing the hotkey no longer registers it again.
   Each time the field lost focus the hotkey was briefly released and re-registered, so a press at
   that moment was lost. A hotkey that failed to register is still retried.
+- Closing Settings while still typing in the hotkey field applies the hotkey typed there. Before,
+  only leaving the field did, so Settings kept showing a hotkey that was never registered (and
+  was not saved), with no error. Text that is not a hotkey gives way to the hotkey in effect when
+  Settings closes, and its error no longer replaces a message saying why quick search is not
+  working.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).

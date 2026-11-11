@@ -61,10 +61,12 @@ fn close_step(has_background: bool, quitting: bool, notice_shown: bool, window_v
     }
 }
 
-/// What becomes of the text in the settings' hotkey field once the user is done with it.
+/// What becomes of the text in the settings' hotkey field.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum HotkeyEdit {
-    /// The hotkey in effect stays, and works: the field shows it again, nothing is registered.
+    /// The user is still typing.
+    Wait,
+    /// The hotkey in effect stays as it is: the field shows it again, nothing is registered.
     Keep,
     /// Register this hotkey.
     Apply(Hotkey),
@@ -72,13 +74,22 @@ enum HotkeyEdit {
     Invalid(String),
 }
 
+/// The field is settled when it loses the focus, or when Settings closes: that takes the field
+/// away without it ever losing the focus, and a hotkey typed there would stay on display without
+/// being registered. Text that is no hotkey then gives way to the hotkey in effect, as nothing is
+/// left to say what is wrong with it.
+///
 /// Registering again the hotkey that is already registered would lose a press made meanwhile, so
-/// an unchanged hotkey that works is kept. One that does not work is registered again, in case
-/// whatever held it has let go.
-fn hotkey_edit(text: &str, in_effect: Hotkey, works: bool) -> HotkeyEdit {
+/// an unchanged hotkey that works is kept. One that does not work is registered again when the
+/// user leaves the field with it, in case whatever held it has let go, but not on every close.
+fn hotkey_edit(text: &str, in_effect: Hotkey, works: bool, lost_focus: bool, settings_closed: bool) -> HotkeyEdit {
+    if !lost_focus && !settings_closed {
+        return HotkeyEdit::Wait;
+    }
     match Hotkey::parse(text) {
-        Ok(hotkey) if hotkey == in_effect && works => HotkeyEdit::Keep,
+        Ok(hotkey) if hotkey == in_effect && (works || !lost_focus) => HotkeyEdit::Keep,
         Ok(hotkey) => HotkeyEdit::Apply(hotkey),
+        Err(_) if settings_closed => HotkeyEdit::Keep,
         Err(e) => HotkeyEdit::Invalid(e),
     }
 }
@@ -142,8 +153,11 @@ pub struct FileCraftApp {
     quick_search: bool,
     /// The hotkey in the settings field, possibly half-typed.
     hotkey_text: String,
+    /// Why the text in the hotkey field is no hotkey.
+    hotkey_text_error: Option<String>,
     /// The last valid hotkey that was asked for.
     hotkey: Hotkey,
+    /// Why quick search or its hotkey does not work.
     hotkey_error: Option<String>,
     /// The notice about keeping running is open.
     close_notice: bool,
@@ -158,6 +172,8 @@ pub struct FileCraftApp {
     excluded: BTreeSet<char>,
     max_age_minutes: u64,
     show_settings: bool,
+    /// Settings was shown on the last pass, so that closing it, however it happens, is noticed.
+    settings_shown: bool,
     show_help: bool,
     focus_search: bool,
     status: Option<(String, Instant)>,
@@ -236,6 +252,7 @@ impl FileCraftApp {
             background: None,
             quick_search,
             hotkey_text: hotkey.to_string(),
+            hotkey_text_error: None,
             hotkey,
             hotkey_error: None,
             close_notice: false,
@@ -246,6 +263,7 @@ impl FileCraftApp {
             excluded,
             max_age_minutes,
             show_settings: false,
+            settings_shown: false,
             show_help: false,
             focus_search: true,
             status: None,
@@ -266,19 +284,26 @@ impl FileCraftApp {
         }
     }
 
-    /// Applies the hotkey typed in the settings.
-    fn apply_hotkey_text(&mut self) {
-        match hotkey_edit(&self.hotkey_text, self.hotkey, self.hotkey_error.is_none()) {
-            HotkeyEdit::Keep => self.hotkey_text = self.hotkey.to_string(),
+    /// Settles the hotkey field once it has lost the focus or Settings has closed.
+    fn apply_hotkey_text(&mut self, lost_focus: bool, settings_closed: bool) {
+        let works = self.hotkey_error.is_none();
+        match hotkey_edit(&self.hotkey_text, self.hotkey, works, lost_focus, settings_closed) {
+            HotkeyEdit::Wait => {}
+            HotkeyEdit::Keep => {
+                self.hotkey_text = self.hotkey.to_string();
+                self.hotkey_text_error = None;
+            }
             HotkeyEdit::Apply(hotkey) => {
                 self.hotkey = hotkey;
                 self.hotkey_text = hotkey.to_string();
-                self.hotkey_error = None;
+                self.hotkey_text_error = None;
+                // Without the background thread, the error says why that is not running.
                 if let Some(background) = &self.background {
+                    self.hotkey_error = None;
                     background.set_hotkey(hotkey);
                 }
             }
-            HotkeyEdit::Invalid(e) => self.hotkey_error = Some(e),
+            HotkeyEdit::Invalid(e) => self.hotkey_text_error = Some(e),
         }
     }
 
@@ -1355,7 +1380,7 @@ impl FileCraftApp {
         let mut open = self.show_settings;
         let mut changed_drives: Vec<(char, bool)> = Vec::new();
         let mut clear_cache = false;
-        let (mut quick_toggled, mut hotkey_committed) = (false, false);
+        let (mut quick_toggled, mut hotkey_lost_focus) = (false, false);
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
@@ -1400,31 +1425,33 @@ impl FileCraftApp {
                     ui.horizontal(|ui| {
                         ui.label("Hotkey");
                         let resp = ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(140.0));
-                        hotkey_committed = resp.lost_focus();
+                        hotkey_lost_focus = resp.lost_focus();
                     });
                 });
-                if let Some(err) = &self.hotkey_error {
+                if let Some(err) = self.hotkey_text_error.as_ref().or(self.hotkey_error.as_ref()) {
                     ui.colored_label(ui.visuals().error_fg_color, err);
                 }
             });
         self.show_settings = open;
+        // However Settings closed (its button, Esc), the field went with it without losing focus.
+        let settings_closed = std::mem::replace(&mut self.settings_shown, open) && !open;
 
         if quick_toggled {
+            // A half-typed hotkey gives way to the one that will actually be registered, so the
+            // field never shows something other than what is in effect.
+            if let Ok(hotkey) = Hotkey::parse(&self.hotkey_text) {
+                self.hotkey = hotkey;
+            }
+            self.hotkey_text = self.hotkey.to_string();
+            self.hotkey_text_error = None;
+            self.hotkey_error = None;
             if self.quick_search {
-                // A half-typed hotkey gives way to the one that will actually be registered, so
-                // the field never shows something other than what is in effect.
-                if let Ok(hotkey) = Hotkey::parse(&self.hotkey_text) {
-                    self.hotkey = hotkey;
-                }
-                self.hotkey_text = self.hotkey.to_string();
-                self.hotkey_error = None;
                 self.start_background(ctx);
             } else {
                 self.background = None;
-                self.hotkey_error = None;
             }
-        } else if hotkey_committed {
-            self.apply_hotkey_text();
+        } else {
+            self.apply_hotkey_text(hotkey_lost_focus, settings_closed);
         }
 
         for (letter, on) in changed_drives {
@@ -1752,20 +1779,44 @@ mod tests {
     #[test]
     fn an_unchanged_working_hotkey_is_not_registered_again() {
         let alt_space = Hotkey::parse("Alt+Space").unwrap();
-        assert_eq!(hotkey_edit("alt+space", alt_space, true), HotkeyEdit::Keep);
+        assert_eq!(hotkey_edit("alt+space", alt_space, true, true, false), HotkeyEdit::Keep);
+        assert_eq!(hotkey_edit("Alt+Space", alt_space, true, false, true), HotkeyEdit::Keep);
     }
 
     #[test]
     fn a_hotkey_that_failed_is_registered_again() {
         let alt_space = Hotkey::parse("Alt+Space").unwrap();
-        assert_eq!(hotkey_edit("Alt+Space", alt_space, false), HotkeyEdit::Apply(alt_space));
+        assert_eq!(hotkey_edit("Alt+Space", alt_space, false, true, false), HotkeyEdit::Apply(alt_space));
+        // Not each time Settings closes, though, only when the user leaves the field with it.
+        assert_eq!(hotkey_edit("Alt+Space", alt_space, false, false, true), HotkeyEdit::Keep);
     }
 
     #[test]
     fn a_new_hotkey_is_registered_and_a_wrong_one_explained() {
         let alt_space = Hotkey::parse("Alt+Space").unwrap();
         let ctrl_k = Hotkey::parse("Ctrl+K").unwrap();
-        assert_eq!(hotkey_edit("Ctrl+K", alt_space, true), HotkeyEdit::Apply(ctrl_k));
-        assert!(matches!(hotkey_edit("Ctrl+", alt_space, true), HotkeyEdit::Invalid(_)));
+        assert_eq!(hotkey_edit("Ctrl+K", alt_space, true, true, false), HotkeyEdit::Apply(ctrl_k));
+        assert!(matches!(hotkey_edit("Ctrl+", alt_space, true, true, false), HotkeyEdit::Invalid(_)));
+    }
+
+    #[test]
+    fn the_hotkey_waits_while_it_is_typed() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        assert_eq!(hotkey_edit("Ctrl+K", alt_space, true, false, false), HotkeyEdit::Wait);
+    }
+
+    /// Closing Settings with the caret still in the field never produces a lost focus.
+    #[test]
+    fn closing_settings_registers_the_typed_hotkey() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        let ctrl_k = Hotkey::parse("Ctrl+K").unwrap();
+        assert_eq!(hotkey_edit("Ctrl+K", alt_space, true, false, true), HotkeyEdit::Apply(ctrl_k));
+    }
+
+    #[test]
+    fn closing_settings_on_a_half_typed_hotkey_shows_the_one_in_effect() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        assert_eq!(hotkey_edit("Ctrl+", alt_space, true, false, true), HotkeyEdit::Keep);
+        assert_eq!(hotkey_edit("Ctrl+", alt_space, false, false, true), HotkeyEdit::Keep);
     }
 }

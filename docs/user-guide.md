@@ -165,6 +165,8 @@ them to the external editor, since those would act on a different item.
 - **Quick search** — the hotkey and the notification area icon. Write the hotkey as modifiers and a
   key, like `Alt+Space` or `Ctrl+Shift+K`; the key is a letter, digit, `F1`–`F24`, `Space`, `Tab`,
   `Enter`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown` or `` ` ``. Only function keys
-  work without a modifier. Turned off, closing the window exits FileCraft.
+  work without a modifier. A new hotkey takes effect when you leave the field or close Settings;
+  if what you typed is not a hotkey, closing Settings goes back to the one in effect. Turned off,
+  closing the window exits FileCraft.
 
 Settings, the window size, sort order and search options are remembered between sessions.
