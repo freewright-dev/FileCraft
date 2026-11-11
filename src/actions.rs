@@ -76,12 +76,29 @@ pub fn reveal(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        Command::new("explorer").raw_arg(select_arg(path)?).spawn().map(|_| ())
+        Command::new(explorer_exe()?).raw_arg(select_arg(path)?).spawn().map(|_| ())
     }
     #[cfg(not(windows))]
     {
         Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn().map(|_| ())
     }
+}
+
+/// `%SystemRoot%\explorer.exe`. A bare `explorer` is looked up in FileCraft's own folder before
+/// System32 and `PATH`, so an `explorer.exe` next to a portable `FileCraft.exe` would run instead.
+#[cfg(windows)]
+fn explorer_exe() -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buf = [0u16; 260];
+    // SAFETY: the buffer is writable and its length in UTF-16 units is passed.
+    let len = unsafe { GetSystemWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A longer result is the size the buffer would need, not a path.
+    let dir = buf.get(..len).ok_or_else(|| io::Error::other("the Windows folder path is too long"))?;
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(dir)).join("explorer.exe"))
 }
 
 /// Explorer's `/select,"…"` argument. Explorer parses its own command line and has no escape for
@@ -292,6 +309,15 @@ mod tests {
     fn reveal_refuses_quotes_in_paths() {
         assert_eq!(select_arg(Path::new(r"C:\dir\a b.txt")).unwrap(), r#"/select,"C:\dir\a b.txt""#);
         assert!(select_arg(Path::new(r#"C:\dir\a" /root,"C:\Windows"#)).is_err());
+    }
+
+    /// Show in folder ran a bare `explorer`, which an `explorer.exe` next to FileCraft overrides.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_is_started_from_the_windows_folder() {
+        let exe = explorer_exe().unwrap();
+        assert!(exe.is_absolute() && exe.is_file(), "{}", exe.display());
+        assert!(exe.file_name().unwrap().eq_ignore_ascii_case("explorer.exe"));
     }
 
     #[cfg(windows)]
