@@ -163,6 +163,10 @@ All notable changes to this project are documented here. The format follows
   which a harmless-looking row would preview, edit, save or open another file. Loading rejects
   names that are empty, `.`, `..` or contain `\`, `/` or NUL. Show in folder refuses paths with a
   `"`, which could end Explorer's argument and add switches of its own (FC-17).
+- An index entry can no longer be named like `notes.txt:payload`. Windows reads such a name as the
+  `payload` data stream of the neighbouring file `notes.txt`, so previewing, editing or saving the
+  entry acted on a hidden stream of another file. Loading a cache now rejects names containing
+  `:`, and the indexers store them as `?`, like other names that are not a usable path component.
 - An instance running as administrator no longer trusts state that unelevated programs of the same
   user can change (FC-18):
   - It asks before running the external editor command, which comes from saved settings or the
