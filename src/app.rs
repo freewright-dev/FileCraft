@@ -61,6 +61,28 @@ fn close_step(has_background: bool, quitting: bool, notice_shown: bool, window_v
     }
 }
 
+/// What becomes of the text in the settings' hotkey field once the user is done with it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum HotkeyEdit {
+    /// The hotkey in effect stays, and works: the field shows it again, nothing is registered.
+    Keep,
+    /// Register this hotkey.
+    Apply(Hotkey),
+    /// The text is no hotkey, for this reason.
+    Invalid(String),
+}
+
+/// Registering again the hotkey that is already registered would lose a press made meanwhile, so
+/// an unchanged hotkey that works is kept. One that does not work is registered again, in case
+/// whatever held it has let go.
+fn hotkey_edit(text: &str, in_effect: Hotkey, works: bool) -> HotkeyEdit {
+    match Hotkey::parse(text) {
+        Ok(hotkey) if hotkey == in_effect && works => HotkeyEdit::Keep,
+        Ok(hotkey) => HotkeyEdit::Apply(hotkey),
+        Err(e) => HotkeyEdit::Invalid(e),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RowAction {
     Open,
@@ -246,8 +268,9 @@ impl FileCraftApp {
 
     /// Applies the hotkey typed in the settings.
     fn apply_hotkey_text(&mut self) {
-        match Hotkey::parse(&self.hotkey_text) {
-            Ok(hotkey) => {
+        match hotkey_edit(&self.hotkey_text, self.hotkey, self.hotkey_error.is_none()) {
+            HotkeyEdit::Keep => self.hotkey_text = self.hotkey.to_string(),
+            HotkeyEdit::Apply(hotkey) => {
                 self.hotkey = hotkey;
                 self.hotkey_text = hotkey.to_string();
                 self.hotkey_error = None;
@@ -255,7 +278,7 @@ impl FileCraftApp {
                     background.set_hotkey(hotkey);
                 }
             }
-            Err(e) => self.hotkey_error = Some(e),
+            HotkeyEdit::Invalid(e) => self.hotkey_error = Some(e),
         }
     }
 
@@ -1724,5 +1747,25 @@ mod tests {
     #[test]
     fn a_hidden_window_does_not_use_up_the_notice() {
         assert_eq!(close_step(true, false, false, false), CloseStep::Hide);
+    }
+
+    #[test]
+    fn an_unchanged_working_hotkey_is_not_registered_again() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        assert_eq!(hotkey_edit("alt+space", alt_space, true), HotkeyEdit::Keep);
+    }
+
+    #[test]
+    fn a_hotkey_that_failed_is_registered_again() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        assert_eq!(hotkey_edit("Alt+Space", alt_space, false), HotkeyEdit::Apply(alt_space));
+    }
+
+    #[test]
+    fn a_new_hotkey_is_registered_and_a_wrong_one_explained() {
+        let alt_space = Hotkey::parse("Alt+Space").unwrap();
+        let ctrl_k = Hotkey::parse("Ctrl+K").unwrap();
+        assert_eq!(hotkey_edit("Ctrl+K", alt_space, true), HotkeyEdit::Apply(ctrl_k));
+        assert!(matches!(hotkey_edit("Ctrl+", alt_space, true), HotkeyEdit::Invalid(_)));
     }
 }
