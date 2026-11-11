@@ -106,6 +106,9 @@ All notable changes to this project are documented here. The format follows
   a cloud placeholder could hang FileCraft for seconds. They now run in the background. Windows'
   own dialogs, such as choosing a program for a file type without one, still appear, and other
   failures are reported in the status bar as before.
+- Opening a result or showing it in its folder from the quick search bar no longer freezes
+  FileCraft either. The bar closes at once and the shell works in the background; a failure that
+  comes later is reported in the main window's status bar.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor

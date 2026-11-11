@@ -240,7 +240,13 @@ impl FileCraftApp {
             .unwrap_or_else(|| Hotkey::parse(DEFAULT_HOTKEY).expect("the default is valid"));
         let bar_signals = Arc::new(BarSignals::default());
         let (to_main, from_bar) = crossbeam_channel::unbounded();
-        let quick_bar = Arc::new(Mutex::new(QuickBar::new(cc.egui_ctx.clone(), Arc::clone(&bar_signals), to_main)));
+        let shell_errors = std::sync::mpsc::channel();
+        let quick_bar = Arc::new(Mutex::new(QuickBar::new(
+            cc.egui_ctx.clone(),
+            Arc::clone(&bar_signals),
+            to_main,
+            shell_errors.0.clone(),
+        )));
 
         let mut app = FileCraftApp {
             indexer,
@@ -287,7 +293,7 @@ impl FileCraftApp {
             editor,
             editor_confirmed: None,
             editor_confirm: None,
-            shell_errors: std::sync::mpsc::channel(),
+            shell_errors,
             excluded,
             max_age_minutes,
             show_settings: false,
