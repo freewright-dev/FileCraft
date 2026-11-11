@@ -103,41 +103,74 @@ pub fn read_volume(
     let mut recs = vec![Rec::default(); record_count];
     let mut names = String::with_capacity(record_count * 16);
     let mut links = Vec::new();
-    let mut buf = vec![0u8; READ_CHUNK];
-    let mut frn = 0usize;
+    let mut read = |offset: u64, buf: &mut [u8]| read_exact_at(&volume, buf, offset);
+    read_records(&runs, cluster, record_size, &mut recs, &mut names, &mut links, progress, cancel, &mut read)?;
 
+    build(letter, &recs, &names, &links, start)
+}
+
+#[cfg(not(windows))]
+pub fn read_volume(_: char, _: &AtomicUsize, _: &AtomicUsize, _: &AtomicBool) -> anyhow::Result<VolumeIndex> {
+    anyhow::bail!("MFT indexing is only available on Windows")
+}
+
+/// Parses records `0..recs.len()` of $MFT, stored in `runs` and read through `read` (volume
+/// byte offset, buffer). Records are numbered by their byte position in $MFT: when clusters are
+/// smaller than records, a record can straddle two runs, and is put together from both.
+#[allow(clippy::too_many_arguments)]
+fn read_records(
+    runs: &[(Option<u64>, u64)],
+    cluster: u64,
+    record_size: usize,
+    recs: &mut [Rec],
+    names: &mut String,
+    links: &mut Vec<Link>,
+    progress: &AtomicUsize,
+    cancel: &AtomicBool,
+    read: &mut dyn FnMut(u64, &mut [u8]) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    let record_count = recs.len();
+    // Bytes of $MFT that hold the records; `runs_cover_records` checked that they fit.
+    let end = record_count as u64 * record_size as u64;
+    let mut buf = vec![0u8; READ_CHUNK];
+    // `buf[..filled]` holds $MFT from byte `frn * record_size`: at most a partial record
+    // between reads.
+    let (mut frn, mut filled) = (0usize, 0usize);
     // `mft_runs` keeps every run inside the volume, so these byte offsets cannot overflow.
-    for (lcn, clusters) in runs {
-        let mut remaining = clusters * cluster;
-        let Some(lcn) = lcn else {
-            // Sparse run: no records stored.
-            let skipped = usize::try_from(remaining / record_size as u64).unwrap_or(usize::MAX);
-            frn = frn.saturating_add(skipped).min(record_count);
-            continue;
-        };
-        let mut offset = lcn * cluster;
-        while remaining > 0 && frn < record_count {
+    'runs: for &(lcn, clusters) in runs {
+        let run_bytes = clusters * cluster;
+        let mut done = 0u64;
+        while done < run_bytes {
+            let left = end - frn as u64 * record_size as u64 - filled as u64;
+            if left == 0 {
+                break 'runs;
+            }
             if cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("cancelled");
             }
-            let want = remaining
-                .min(READ_CHUNK as u64)
-                .min((record_count - frn) as u64 * record_size as u64) as usize;
-            read_exact_at(&volume, &mut buf[..want], offset)?;
-            for record in buf[..want].chunks_exact_mut(record_size) {
-                parse_record(record, frn, &mut recs, &mut names, &mut links);
+            let want = (run_bytes - done).min((READ_CHUNK - filled) as u64).min(left) as usize;
+            let chunk = &mut buf[filled..filled + want];
+            match lcn {
+                Some(lcn) => read(lcn * cluster + done, chunk)?,
+                // Sparse run: no records stored.
+                None => chunk.fill(0),
+            }
+            filled += want;
+            done += want as u64;
+            let whole = filled - filled % record_size;
+            for record in buf[..whole].chunks_exact_mut(record_size) {
+                parse_record(record, frn, recs, names, links);
                 frn += 1;
             }
-            offset += want as u64;
-            remaining -= want as u64;
+            buf.copy_within(whole..filled, 0);
+            filled -= whole;
             progress.store(frn, Ordering::Relaxed);
         }
     }
     if frn < record_count {
         anyhow::bail!("$MFT data runs covered {frn} of {record_count} records");
     }
-
-    build(letter, &recs, &names, &links, start)
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -799,6 +832,32 @@ mod tests {
         let mut plain = record(RECORD_IN_USE, 0, &[data_at(0, &[0x11, 0x08, 0x02])]);
         assert!(apply_fixup(&mut plain));
         assert_eq!(mft_data_runs(&plain, 64, CLUSTER, RECORD, &mut read).unwrap(), vec![(Some(2), 8)]);
+    }
+
+    /// With 512-byte clusters and 1 KiB records, a run of an odd number of clusters ends in the
+    /// middle of a record. That record is put together from both runs and the ones after it
+    /// keep their numbers. Each run used to be cut into records from its own start, so every
+    /// later record was misread and the table came up short (or an index came out partial).
+    #[test]
+    fn records_straddling_two_runs_are_read_whole() {
+        const CLUSTER: u64 = 512;
+        let mut disk = vec![0u8; 64 * CLUSTER as usize];
+        let mft: Vec<u8> = (0..3).flat_map(|_| record(RECORD_IN_USE, 0, &[])).collect();
+        // Clusters 0-2 of $MFT at LCN 10, clusters 3-5 at LCN 40: record 1 is split.
+        disk[10 * 512..13 * 512].copy_from_slice(&mft[..3 * 512]);
+        disk[40 * 512..43 * 512].copy_from_slice(&mft[3 * 512..]);
+        let runs = [(Some(10), 3), (Some(40), 3)];
+        let mut read = |offset: u64, buf: &mut [u8]| {
+            let o = offset as usize;
+            buf.copy_from_slice(&disk[o..o + buf.len()]);
+            Ok(())
+        };
+        let mut recs = vec![Rec::default(); 3];
+        let progress = AtomicUsize::new(0);
+        read_records(&runs, CLUSTER, RECORD, &mut recs, &mut String::new(), &mut Vec::new(), &progress, &AtomicBool::new(false), &mut read)
+            .unwrap();
+        assert!(recs.iter().all(|r| r.in_use), "every record is parsed");
+        assert_eq!(progress.load(Ordering::Relaxed), 3);
     }
 
     /// FC-10: a record shorter than the fixed header is ignored rather than read out of bounds.

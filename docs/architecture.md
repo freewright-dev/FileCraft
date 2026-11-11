@@ -37,7 +37,9 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
 ## Indexing
 
 - **MFT** (`mft.rs`) — opens `\\.\X:`, gets the geometry with `FSCTL_GET_NTFS_VOLUME_DATA`, decodes
-  the data runs of `$MFT` from record 0, then reads the table in 4 MB chunks. For each record it
+  the data runs of `$MFT` from record 0, then reads the table in 4 MB chunks. Records are numbered
+  by their byte position in `$MFT`, so a record split between two runs (clusters smaller than
+  records) is put together from both. For each record it
   applies the update-sequence fixups (rejecting torn records) and parses `$STANDARD_INFORMATION`
   (mtime, attributes), `$FILE_NAME` (parent, name; Win32 names are preferred over DOS 8.3 names)
   and the unnamed `$DATA` attribute (size). Extension records are merged into their base record.
