@@ -90,6 +90,9 @@ enum Test {
 /// One search term: matches when any alternative matches (`a|b`), inverted by `!`.
 struct Clause {
     alts: Vec<Test>,
+    /// The `file:`/`folder:` in front of the term: only entries of that type match, so `!` in
+    /// front of `folder:tmp` excludes folders containing `tmp` and keeps everything else.
+    kind: Option<Test>,
     negate: bool,
 }
 
@@ -110,7 +113,7 @@ impl Query {
                     .case_insensitive(!case)
                     .build()
                     .map_err(|e| short_error(&e.to_string()))?;
-                clauses.push(Clause { alts: vec![Test::Regex { re, path: opts.match_path }], negate: false });
+                clauses.push(Clause { alts: vec![Test::Regex { re, path: opts.match_path }], kind: None, negate: false });
             }
             return Ok(Query { clauses, case });
         }
@@ -130,6 +133,7 @@ impl Query {
                 continue;
             }
             // `folder:src` = folders whose name contains `src` (the type test is ANDed).
+            let mut kind = None;
             if let Some(colon) = body[..head].find(':') {
                 let type_test = match body[..colon].to_ascii_lowercase().as_str() {
                     "file" | "files" => Some(Test::File),
@@ -138,10 +142,11 @@ impl Query {
                 };
                 if let Some(t) = type_test {
                     let value = body[colon + 1..].to_string();
-                    clauses.push(Clause { alts: vec![t], negate: negate && value.is_empty() });
                     if value.is_empty() {
+                        clauses.push(Clause { alts: vec![t], kind: None, negate });
                         continue;
                     }
+                    kind = Some(t);
                     body = value;
                     head -= colon + 1;
                 }
@@ -157,7 +162,9 @@ impl Query {
                 parse_term(&body, opts, case)?
             };
             if !alts.is_empty() {
-                clauses.push(Clause { alts, negate });
+                clauses.push(Clause { alts, kind, negate });
+            } else if let Some(t) = kind {
+                clauses.push(Clause { alts: vec![t], kind: None, negate });
             }
         }
         Ok(Query { clauses, case })
@@ -448,9 +455,11 @@ impl DirChain {
 
 impl Query {
     fn matches(&self, v: &VolumeIndex, idx: u32, scratch: &mut Scratch) -> bool {
-        self.clauses
-            .iter()
-            .all(|c| c.alts.iter().any(|t| self.test(t, v, idx, scratch)) != c.negate)
+        self.clauses.iter().all(|c| {
+            let hit = c.kind.as_ref().is_none_or(|k| self.test(k, v, idx, scratch))
+                && c.alts.iter().any(|t| self.test(t, v, idx, scratch));
+            hit != c.negate
+        })
     }
 
     fn test(&self, test: &Test, v: &VolumeIndex, idx: u32, scratch: &mut Scratch) -> bool {
@@ -956,6 +965,16 @@ mod tests {
         assert_eq!(names("regex:^[a-m].*\\.\\w+$"), ["big.bin", "main.rs"]);
         assert!(Query::parse("size:>10zb", SearchOptions::default()).is_err());
         assert!(Query::parse("regex:(", SearchOptions::default()).is_err());
+    }
+
+    /// `!folder:o` excludes the folders containing `o`. It used to negate only the text, so it
+    /// meant "folders not containing `o`" and hid every file.
+    #[test]
+    fn negated_type_terms_exclude_the_whole_term() {
+        assert_eq!(names("!folder:o"), ["big.bin", "main.rs", "Notes.TXT", "readme.md", "src"]);
+        assert_eq!(names("!file:m"), ["big.bin", "docs", "Notes.TXT", "src"]);
+        assert_eq!(names("!folder:\"o\""), names("!folder:o"));
+        assert_eq!(names("!folder:s|z"), ["big.bin", "main.rs", "Notes.TXT", "readme.md"]);
     }
 
     /// FC-09: out-of-range numbers are errors instead of panics (debug) or wrapped bounds (release).

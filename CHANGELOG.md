@@ -132,6 +132,9 @@ All notable changes to this project are documented here. The format follows
   milliseconds, whatever the sort column (FC-12).
 - A quoted term with a `/`, such as `"src/main"`, now matches full paths like the same term
   without quotes. Only unquoted terms had their `/` read as `\`, so quoted ones found nothing.
+- `!folder:tmp` and `!file:tmp` now exclude the folders (or files) containing `tmp` and keep
+  everything else. The `!` applied only to the text, so `!folder:tmp` meant "folders not
+  containing `tmp`" and hid every file.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
