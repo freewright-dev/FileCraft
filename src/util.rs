@@ -148,22 +148,23 @@ pub fn fs_path(full: &str) -> std::path::PathBuf {
 }
 
 /// Whether Win32 would resolve the plain path `full` to a different item: a component ends in a
-/// dot or a space, or is a reserved device name (`CON`, `NUL`, `COM1`, `LPT1.txt` …). The shell
-/// and other programs only accept plain paths, so such items cannot be handed to them safely.
+/// dot or a space (which covers `.` and `..`), or is a reserved device name (`CON`, `NUL`,
+/// `CONIN$`, `COM1`, `COM¹`, `LPT1.txt` …). Both `\` and `/` separate components. The shell and
+/// other programs only accept plain paths, so such items cannot be handed to them safely.
 pub fn win32_alias(full: &str) -> bool {
-    const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    const DEVICES: [&str; 7] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"];
     let rest = full.get(3..).filter(|_| full.as_bytes().get(1) == Some(&b':')).unwrap_or(full);
-    rest.split('\\').filter(|c| !c.is_empty()).any(|c| {
+    rest.split(['\\', '/']).filter(|c| !c.is_empty()).any(|c| {
         if c.ends_with(['.', ' ']) {
             return true;
         }
         let stem = c.split('.').next().unwrap_or(c).trim_end_matches(' ');
         let upper = stem.to_ascii_uppercase();
-        DEVICES.contains(&upper.as_str())
-            || (upper.len() == 4
-                && (upper.starts_with("COM") || upper.starts_with("LPT"))
-                && upper.as_bytes()[3].is_ascii_digit()
-                && upper.as_bytes()[3] != b'0')
+        // `COM1`-`COM9` and `LPT1`-`LPT9`; Win32 also reads the superscripts `¹²³` as digits.
+        let numbered = upper.strip_prefix("COM").or_else(|| upper.strip_prefix("LPT")).is_some_and(|n| {
+            matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+        });
+        DEVICES.contains(&upper.as_str()) || numbered
     })
 }
 
@@ -183,6 +184,29 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(fs_path(r"C:\x\report.txt."), std::path::PathBuf::from(r"\\?\C:\x\report.txt."));
         assert_eq!(fs_path("relative"), std::path::PathBuf::from("relative"));
+    }
+
+    /// Device names Win32 also reserves (`CONIN$`, `COM¹`), and components it rewrites when they
+    /// are separated by `/`, were not detected, so the shell could be handed a different item.
+    #[test]
+    fn detects_more_paths_win32_would_rewrite() {
+        for alias in [
+            r"C:\x\..\Windows\win.ini",
+            r"C:\x\.\f.txt",
+            r"C:\x\CONIN$",
+            r"C:\x\conout$.txt",
+            r"C:\x\CLOCK$",
+            r"C:\x\COM¹",
+            r"C:\x\lpt³.log",
+            "C:/x/report.txt.",
+            "C:/x/nul",
+            "C:/x/../y",
+        ] {
+            assert!(win32_alias(alias), "{alias}");
+        }
+        for plain in [r"C:\x\COM⁴", r"C:\x\COM10", r"C:\x\CONIN", r"C:\x\com¹x", "C:/x/report.txt"] {
+            assert!(!win32_alias(plain), "{plain}");
+        }
     }
 
     /// FC-19: a timestamp near `i64::MAX` (settable by any user) panicked in debug builds when a

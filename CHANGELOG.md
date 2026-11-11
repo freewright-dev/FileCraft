@@ -178,6 +178,10 @@ All notable changes to this project are documented here. The format follows
 - Loading an index cache now applies the same name checks to each entry's lowercased name, which
   search and the selection use. Before, only the displayed name was checked, so a rewritten
   cache could pair a harmless name with a lowercased one such as `..\..\x`.
+- Open, Show in folder, Properties and the external editor now also refuse items named like the
+  devices `CONIN$`, `CONOUT$` and `CLOCK$`, or `COM¹`–`COM³` and `LPT¹`–`LPT³`, which Windows
+  reads as `COM1`–`COM3` and `LPT1`–`LPT3`, and check components separated by `/` as well as
+  `\`. Before, such a path was handed to the shell, which acted on a device or a different item.
 - An instance running as administrator no longer trusts state that unelevated programs of the same
   user can change (FC-18):
   - It asks before running the external editor command, which comes from saved settings or the
