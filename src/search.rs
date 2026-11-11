@@ -713,16 +713,22 @@ pub struct Response {
 /// Picks the hits worth showing, given the snapshot, the hits and the query text.
 pub type Ranker = Box<dyn Fn(&Index, &[Hit], &str) -> Vec<Hit> + Send>;
 
-/// Unfiltered result lists, one per sort order, for the snapshot they were computed on. The
-/// snapshot's volumes are held, not just their addresses: once a volume is freed its address can
-/// be reused by a newer one, which would then be served the old results (MIN-04).
+/// Unfiltered result lists for the snapshot they were computed on, for the last
+/// [`EverythingCache::KEEP`] sort orders used. The snapshot's volumes are held, not just their
+/// addresses: once a volume is freed its address can be reused by a newer one, which would then
+/// be served the old results (MIN-04).
 #[derive(Default)]
 struct EverythingCache {
     snapshot: Vec<Arc<VolumeIndex>>,
+    /// Least recently used first.
     lists: Vec<(Sort, Arc<Vec<Hit>>)>,
 }
 
 impl EverythingCache {
+    /// Each list holds every entry (40 MB for 5 million), so only the latest few sorts are kept:
+    /// enough to flip a column between ascending and descending.
+    const KEEP: usize = 2;
+
     /// Forgets the cached lists unless `volumes` is the snapshot they belong to.
     fn use_snapshot(&mut self, volumes: &[Arc<VolumeIndex>]) {
         let same = self.snapshot.len() == volumes.len() && self.snapshot.iter().zip(volumes).all(|(a, b)| Arc::ptr_eq(a, b));
@@ -732,11 +738,18 @@ impl EverythingCache {
         }
     }
 
-    fn get(&self, sort: Sort) -> Option<Arc<Vec<Hit>>> {
-        self.lists.iter().find(|(s, _)| *s == sort).map(|(_, h)| Arc::clone(h))
+    fn get(&mut self, sort: Sort) -> Option<Arc<Vec<Hit>>> {
+        let pos = self.lists.iter().position(|(s, _)| *s == sort)?;
+        let entry = self.lists.remove(pos);
+        let hits = Arc::clone(&entry.1);
+        self.lists.push(entry);
+        Some(hits)
     }
 
     fn insert(&mut self, sort: Sort, hits: Arc<Vec<Hit>>) {
+        if self.lists.len() >= Self::KEEP {
+            self.lists.remove(0);
+        }
         self.lists.push((sort, hits));
     }
 }
@@ -955,6 +968,23 @@ mod tests {
         cache.use_snapshot(std::slice::from_ref(&new));
         assert!(cache.get(Sort::default()).is_none());
         assert_eq!(Arc::strong_count(&old), 1);
+    }
+
+    /// The cache kept one full list per sort order it had seen (up to eight), hundreds of MB on
+    /// a large index. It now keeps the most recently used two.
+    #[test]
+    fn unfiltered_cache_keeps_the_latest_two_sorts() {
+        let sort = |key, descending| Sort { key, descending };
+        let (name, name_desc, size) = (sort(SortKey::Name, false), sort(SortKey::Name, true), sort(SortKey::Size, false));
+        let mut cache = EverythingCache::default();
+        cache.use_snapshot(&[Arc::new(sample())]);
+        cache.insert(name, Arc::new(Vec::new()));
+        cache.insert(name_desc, Arc::new(Vec::new()));
+        assert!(cache.get(name).is_some(), "using a list keeps it");
+        cache.insert(size, Arc::new(Vec::new()));
+        assert!(cache.get(name_desc).is_none(), "the least recently used list is dropped");
+        assert!(cache.get(name).is_some());
+        assert!(cache.get(size).is_some());
     }
 
     fn run(text: &str, opts: SearchOptions, sort: Sort) -> Result<Vec<String>, String> {

@@ -144,6 +144,9 @@ All notable changes to this project are documented here. The format follows
 - Date filters (`dm:2026-03-29`, `dm:yesterday`, `dm:>date`, `dm:<=date`, `dm:a..b`) now end each
   day at the next date's midnight. They used to add 24 hours to the day's start, so on a
   daylight-saving change day the range ended an hour early or late.
+- The searcher no longer keeps an unfiltered result list for every sort order clicked (up to
+  eight, about 320 MB on a 5-million-entry index). It keeps the last two, enough to flip a column
+  between ascending and descending.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
