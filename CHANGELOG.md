@@ -37,6 +37,10 @@ All notable changes to this project are documented here. The format follows
   advisories and yanked crates show up between pull requests. Third-party actions are pinned to
   commit SHAs, and Dependabot proposes updates (MIN-04).
 
+### Changed
+
+- README: removed the Freewright and Discord links.
+
 ### Fixed
 
 - Choosing *Edit in preview pane* or pressing F4 again while already editing no longer resets the
