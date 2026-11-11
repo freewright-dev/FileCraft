@@ -156,6 +156,11 @@ All notable changes to this project are documented here. The format follows
   instead of crashing. Its record state (up to about 3.7 GB below the 64 Mi record cap) was
   allocated in a way that ends the process when the memory is not there, so the documented
   fallback never ran.
+- Files whose folder is deleted while the master file table is being read are no longer listed
+  under whatever new folder reuses its record. The table is read from the live volume, and the
+  reader ignored the sequence number NTFS adds to each parent reference, so such files showed up
+  with wrong full paths. A parent reference must now match its record's sequence number, and
+  entries whose parent does not are left out like other invalid ones.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.

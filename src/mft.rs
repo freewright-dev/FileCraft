@@ -31,6 +31,7 @@ const REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 #[derive(Clone, Copy)]
 struct Link {
     frn: usize,
+    /// File reference of the parent folder (record number and sequence number).
     parent: u64,
     name_off: u32,
     name_len: u16,
@@ -38,9 +39,12 @@ struct Link {
 
 #[derive(Clone, Copy, Default)]
 struct Rec {
+    /// File reference of the parent folder (record number and sequence number).
     parent: u64,
     name_off: u32,
     name_len: u16,
+    /// Sequence number of this record: bumped by NTFS each time the record is reused.
+    seq: u16,
     name_ns: u8,
     has_name: bool,
     in_use: bool,
@@ -48,6 +52,14 @@ struct Rec {
     attrs: u32,
     size: u64,
     mtime: i64,
+}
+
+/// The record a file reference points to, if that record still holds the same file: its
+/// sequence number matches the reference's. The volume is read live, so a folder deleted and
+/// its record reused during the read would otherwise adopt the old folder's children.
+fn referenced(recs: &[Rec], reference: u64) -> Option<usize> {
+    let frn = usize::try_from(reference & REF_MASK).ok()?;
+    recs.get(frn).filter(|r| r.seq == (reference >> 48) as u16).map(|_| frn)
 }
 
 #[cfg(windows)]
@@ -330,6 +342,7 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
     if base == 0 {
         rec.in_use = true;
         rec.is_dir = flags & RECORD_IS_DIRECTORY != 0;
+        rec.seq = u16_at(record, 0x10);
     }
 
     for (ty, attr) in attributes(record) {
@@ -368,7 +381,7 @@ fn parse_record(record: &mut [u8], frn: usize, recs: &mut [Rec], names: &mut Str
                 let name_off = names.len() as u32;
                 let name_len = name.len().min(u16::MAX as usize) as u16;
                 names.push_str(&name);
-                let parent = u64_at(v, 0) & REF_MASK;
+                let parent = u64_at(v, 0);
                 if another_link {
                     links.push(Link { frn: target, parent, name_off, name_len });
                     continue;
@@ -615,13 +628,13 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
         let mut cur = i;
         while state[cur] == UNKNOWN {
             let r = &recs[cur];
-            let parent = r.parent as usize;
             // No depth limit: a loop ends at a VISITING record and is rejected, so deep folders
             // are indexed like the folder scan does instead of being dropped.
-            if !r.in_use || !r.has_name || cur < FIRST_USER_RECORD || parent >= n {
+            let parent = referenced(recs, r.parent);
+            let Some(parent) = parent.filter(|_| r.in_use && r.has_name && cur >= FIRST_USER_RECORD) else {
                 state[cur] = INVALID;
                 break;
-            }
+            };
             state[cur] = VISITING;
             stack.push(cur);
             cur = parent;
@@ -658,12 +671,13 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
         }
         let r = &recs[i];
         let size = if r.is_dir { 0 } else { r.size };
-        builder.push(name_at(r.name_off, r.name_len), ids[r.parent as usize], attrs_of(r), size, r.mtime);
+        // Valid records have a valid parent.
+        builder.push(name_at(r.name_off, r.name_len), ids[(r.parent & REF_MASK) as usize], attrs_of(r), size, r.mtime);
     }
     // Further hard links of indexed files, under folders that are indexed too. Pushed after
     // every record, so the ids above still match the builder's.
     for l in links {
-        let parent = usize::try_from(l.parent).unwrap_or(usize::MAX);
+        let parent = referenced(recs, l.parent).unwrap_or(usize::MAX);
         let Some(r) = recs.get(l.frn).filter(|r| !r.is_dir && ids[l.frn] != NONE) else { continue };
         let Some(&parent_id) = ids.get(parent).filter(|&&id| id != NONE) else { continue };
         builder.push(name_at(l.name_off, l.name_len), parent_id, attrs_of(r), r.size, r.mtime);
@@ -678,12 +692,17 @@ mod tests {
 
     const RECORD: usize = 1024;
 
-    /// Builds a fixed-up-on-disk style FILE record with the given attributes.
+    /// Builds a fixed-up-on-disk style FILE record with the given attributes (sequence number 1).
     fn record(flags: u16, base: u64, attrs: &[Vec<u8>]) -> Vec<u8> {
+        record_seq(1, flags, base, attrs)
+    }
+
+    fn record_seq(seq: u16, flags: u16, base: u64, attrs: &[Vec<u8>]) -> Vec<u8> {
         let mut r = vec![0u8; RECORD];
         r[0..4].copy_from_slice(b"FILE");
         r[4..6].copy_from_slice(&0x30u16.to_le_bytes()); // update sequence array offset
         r[6..8].copy_from_slice(&3u16.to_le_bytes()); // 1 USN + 2 strides
+        r[0x10..0x12].copy_from_slice(&seq.to_le_bytes());
         r[0x14..0x16].copy_from_slice(&0x38u16.to_le_bytes());
         r[0x16..0x18].copy_from_slice(&flags.to_le_bytes());
         r[0x20..0x28].copy_from_slice(&base.to_le_bytes());
@@ -715,10 +734,16 @@ mod tests {
         a
     }
 
+    /// A `$FILE_NAME` under record `parent` with sequence number 1.
     fn file_name(parent: u64, name: &str, namespace: u8) -> Vec<u8> {
+        file_name_ref(parent | (1 << 48), name, namespace)
+    }
+
+    /// A `$FILE_NAME` under the parent file `reference` (record number and sequence number).
+    fn file_name_ref(reference: u64, name: &str, namespace: u8) -> Vec<u8> {
         let units: Vec<u16> = name.encode_utf16().collect();
         let mut v = vec![0u8; 0x42 + units.len() * 2];
-        v[0..8].copy_from_slice(&(parent | (1 << 48)).to_le_bytes()); // sequence number in the high bits
+        v[0..8].copy_from_slice(&reference.to_le_bytes());
         v[0x40] = units.len() as u8;
         v[0x41] = namespace;
         for (i, u) in units.iter().enumerate() {
@@ -983,6 +1008,33 @@ mod tests {
         let mut paths: Vec<String> = v.by_name.iter().map(|&i| v.full_path(i)).collect();
         paths.sort();
         assert_eq!(paths, [r"C:\Users", r"C:\Users\a.txt", r"C:\b link.txt"]);
+    }
+
+    /// A parent reference carries the parent record's sequence number. When a folder is deleted
+    /// and its record reused while the live volume is read, references to the old folder no
+    /// longer match, and those entries are dropped like other invalid parents. They used to be
+    /// listed under the new folder, with wrong full paths.
+    #[test]
+    fn stale_parent_references_are_dropped() {
+        let mut recs = vec![Rec::default(); 20];
+        let mut names = String::new();
+        let mut links = Vec::new();
+        let dir = RECORD_IN_USE | RECORD_IS_DIRECTORY;
+        let mut raw = [
+            (5, record(dir, 0, &[file_name(5, ".", 3)])),
+            // Record 16 held a folder (sequence 1) and now holds "New" (sequence 2).
+            (16, record_seq(2, dir, 0, &[file_name(5, "New", 3)])),
+            (17, record(RECORD_IN_USE, 0, &[file_name(16, "old child.txt", 1)])),
+            (18, record(RECORD_IN_USE, 0, &[file_name_ref(16 | (2 << 48), "new child.txt", 1), file_name(16, "old link.txt", 1)])),
+        ];
+        for (frn, rec) in raw.iter_mut() {
+            parse_record(rec, *frn, &mut recs, &mut names, &mut links);
+        }
+
+        let v = build('C', &recs, &names, &links, Instant::now()).unwrap();
+        let mut paths: Vec<String> = v.by_name.iter().map(|&i| v.full_path(i)).collect();
+        paths.sort();
+        assert_eq!(paths, [r"C:\New", r"C:\New\new child.txt"]);
     }
 
     #[test]

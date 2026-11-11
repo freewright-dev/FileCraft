@@ -44,7 +44,9 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
   (mtime, attributes), `$FILE_NAME` (parent, name; Win32 names are preferred over DOS 8.3 names)
   and the unnamed `$DATA` attribute (size). Extension records are merged into their base record.
   Only records reachable from the root (record 5) through valid parents are kept, which drops the
-  NTFS metadata files and anything under `$Extend`. Bad input fails closed and falls back to the
+  NTFS metadata files and anything under `$Extend`. A parent reference is valid only when its
+  sequence number matches the parent record's (the volume is read live, so a record can be reused
+  meanwhile). Bad input fails closed and falls back to the
   walk:
   - geometry that is incomplete or inconsistent with the volume size;
   - more than 64 Mi records, or record state (about 56 bytes per record) that cannot be allocated;
