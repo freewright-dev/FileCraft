@@ -33,15 +33,43 @@ pub fn local_offset() -> i64 {
 
 /// FILETIME of local midnight at the start of today.
 pub fn local_midnight_today() -> i64 {
-    let offset = local_offset();
-    let local_now = now_filetime() + offset;
-    local_now - local_now.rem_euclid(TICKS_PER_DAY) - offset
+    let local_now = now_filetime() + local_offset();
+    let (y, m, d) = civil_from_days((local_now - UNIX_EPOCH_TICKS).div_euclid(TICKS_PER_DAY));
+    local_midnight(y, m, d)
 }
 
-/// FILETIME of local midnight for a calendar date.
+/// FILETIME of local midnight for a calendar date, using the UTC offset in effect on that date
+/// rather than today's, so a date on the other side of a daylight-saving change is not an hour
+/// off. Falls back to today's offset if Windows cannot convert the date.
+#[cfg(windows)]
 pub fn local_midnight(year: i64, month: u32, day: u32) -> i64 {
-    let days = days_from_civil(year, month, day);
-    UNIX_EPOCH_TICKS + days * TICKS_PER_DAY - local_offset()
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::{
+        DYNAMIC_TIME_ZONE_INFORMATION, GetDynamicTimeZoneInformation, TIME_ZONE_ID_INVALID, TzSpecificLocalTimeToSystemTimeEx,
+    };
+    let fallback = || UNIX_EPOCH_TICKS + days_from_civil(year, month, day) * TICKS_PER_DAY - local_offset();
+    let (Ok(year), Ok(month), Ok(day)) = (u16::try_from(year), u16::try_from(month), u16::try_from(day)) else {
+        return fallback();
+    };
+    let local = SYSTEMTIME { wYear: year, wMonth: month, wDay: day, ..SYSTEMTIME::default() };
+    let mut utc = SYSTEMTIME::default();
+    let mut zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    // SAFETY: every pointer references a valid, writable-where-needed struct of the right type.
+    let converted = unsafe {
+        GetDynamicTimeZoneInformation(&mut zone) != TIME_ZONE_ID_INVALID
+            && TzSpecificLocalTimeToSystemTimeEx(&zone, &local, &mut utc) != 0
+    };
+    if !converted {
+        return fallback();
+    }
+    let days = days_from_civil(utc.wYear as i64, utc.wMonth as u32, utc.wDay as u32);
+    let secs = (utc.wHour as i64 * 60 + utc.wMinute as i64) * 60 + utc.wSecond as i64;
+    UNIX_EPOCH_TICKS + days * TICKS_PER_DAY + secs * TICKS_PER_SEC + utc.wMilliseconds as i64 * 10_000
+}
+
+#[cfg(not(windows))]
+pub fn local_midnight(year: i64, month: u32, day: u32) -> i64 {
+    UNIX_EPOCH_TICKS + days_from_civil(year, month, day) * TICKS_PER_DAY
 }
 
 /// Parses `YYYY-MM-DD` (or `YYYY/MM/DD`).
@@ -206,6 +234,31 @@ mod tests {
         }
         for plain in [r"C:\x\COM⁴", r"C:\x\COM10", r"C:\x\CONIN", r"C:\x\com¹x", "C:/x/report.txt"] {
             assert!(!win32_alias(plain), "{plain}");
+        }
+    }
+
+    /// Date filters used today's UTC offset for every date, so a date on the other side of a
+    /// daylight-saving change started an hour early or late. Midnight of a winter and of a
+    /// summer date must each read back as 00:00 local time on that date.
+    #[cfg(windows)]
+    #[test]
+    fn local_midnight_uses_the_dates_own_offset() {
+        use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+        use windows_sys::Win32::System::Time::{
+            DYNAMIC_TIME_ZONE_INFORMATION, FileTimeToSystemTime, GetDynamicTimeZoneInformation, SystemTimeToTzSpecificLocalTimeEx,
+        };
+        let mut zone = DYNAMIC_TIME_ZONE_INFORMATION::default();
+        // SAFETY: `zone` is a valid, writable struct.
+        unsafe { GetDynamicTimeZoneInformation(&mut zone) };
+        for (y, m, d) in [(2026, 1, 15), (2026, 7, 15), (2025, 12, 31), (2025, 6, 30)] {
+            let ft = local_midnight(y, m, d);
+            let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
+            let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+            // SAFETY: every pointer references a valid struct of the right type.
+            let ok = unsafe { FileTimeToSystemTime(&ft, &mut utc) != 0 && SystemTimeToTzSpecificLocalTimeEx(&zone, &utc, &mut local) != 0 };
+            assert!(ok, "{y}-{m}-{d}");
+            let got = (local.wYear as i64, local.wMonth as u32, local.wDay as u32, local.wHour, local.wMinute, local.wSecond);
+            assert_eq!(got, (y, m, d, 0, 0, 0), "{y}-{m}-{d}");
         }
     }
 
