@@ -760,11 +760,12 @@ impl VolumeIndex {
             if e.parent != NONE && e.parent as usize >= count {
                 return Err(invalid("bad parent id"));
             }
-            if arena_str(&names, e.name_off, e.name_len).is_none() || arena_str(&lower, e.lower_off, e.lower_len).is_none() {
+            let (Some(name), Some(lower_name)) = (arena_str(&names, e.name_off, e.name_len), arena_str(&lower, e.lower_off, e.lower_len)) else {
                 return Err(invalid("bad name range"));
-            }
-            // Every linked entry (all but the root and unfilled slots) is one path component.
-            if i != 0 && e.parent != NONE && !arena_str(&names, e.name_off, e.name_len).is_some_and(valid_name) {
+            };
+            // Every linked entry (all but the root and unfilled slots) is one path component, in
+            // both arenas: the lowercased name is what path terms and the selection match on.
+            if i != 0 && e.parent != NONE && !(valid_name(name) && valid_name(lower_name)) {
                 return Err(invalid("bad name"));
             }
             entries.push(e);
@@ -1187,6 +1188,15 @@ pub mod tests {
             b.push(bad, dir, 0, 1, 0);
             load_error(&format!("name-{label}"), &cache_bytes(&b.finish(Source::Walk, Duration::ZERO)), 'C');
         }
+        // The lowercased copy is checked too: `ab` whose lowercase name was rewritten to `a\`.
+        let mut b = VolumeBuilder::new('C');
+        b.push("ab", 0, 0, 1, 0);
+        let v = b.finish(Source::Walk, Duration::ZERO);
+        let lower_at = 8 + 4 + 1 + 8 + 8 + (8 + v.names.len()) + 8;
+        let mut bytes = cache_bytes(&v);
+        assert_eq!(&bytes[lower_at..lower_at + 4], b"c:ab");
+        bytes[lower_at + 3] = b'\\';
+        load_error("lower-name", &bytes, 'C');
         // Names that are odd but valid on NTFS still load. The folder scan stores a name that is
         // not a path component as `?`, so its caches load too.
         let mut b = VolumeBuilder::new('C');

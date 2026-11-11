@@ -175,6 +175,9 @@ All notable changes to this project are documented here. The format follows
   `payload` data stream of the neighbouring file `notes.txt`, so previewing, editing or saving the
   entry acted on a hidden stream of another file. Loading a cache now rejects names containing
   `:`, and the indexers store them as `?`, like other names that are not a usable path component.
+- Loading an index cache now applies the same name checks to each entry's lowercased name, which
+  search and the selection use. Before, only the displayed name was checked, so a rewritten
+  cache could pair a harmless name with a lowercased one such as `..\..\x`.
 - An instance running as administrator no longer trusts state that unelevated programs of the same
   user can change (FC-18):
   - It asks before running the external editor command, which comes from saved settings or the

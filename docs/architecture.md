@@ -103,8 +103,8 @@ before the index is used:
 - the cache holds at most 64 Mi entries (the NTFS reader's record limit), so a crafted count
   cannot make loading allocate many times the file's size;
 - every name range lies inside its arena on character boundaries, and every linked entry's name
-  is one path component (not empty, `.` or `..`, no `\`, `/`, `:` or NUL; the NTFS reader and
-  the folder scan store `?` for names that are not);
+  and lowercased name are one path component (not empty, `.` or `..`, no `\`, `/`, `:` or NUL;
+  the NTFS reader and the folder scan store `?` for names that are not);
 - parent ids are in range, entry 0 is a root folder, and every entry with a parent reaches
   the root through its parent links (no loops, no unused slot along the way), so full paths are
   always rebuilt completely, at any depth;
