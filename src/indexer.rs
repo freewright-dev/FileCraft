@@ -46,6 +46,9 @@ pub struct VolumeStatus {
     pub refreshing: bool,
     /// Items the last folder scan could not read (they are missing from the index).
     pub skipped: usize,
+    /// Folders the last folder scan listed but did not enter: junctions, symbolic links and
+    /// mount points (their contents are not indexed under them).
+    pub not_followed: usize,
     /// Why the last index could not be written to the cache, if it could not.
     pub cache_error: Option<String>,
 }
@@ -120,6 +123,7 @@ impl Indexer {
                 build_time: previous.as_ref().and_then(|p| p.build_time),
                 refreshing: false,
                 skipped: previous.as_ref().map_or(0, |p| p.skipped),
+                not_followed: previous.as_ref().map_or(0, |p| p.not_followed),
                 cache_error: previous.as_ref().and_then(|p| p.cache_error.clone()),
             };
             status.insert(drive.letter, st.clone());
@@ -227,7 +231,7 @@ impl Job {
             }
         });
 
-        let skipped = AtomicUsize::new(0);
+        let (skipped, not_followed) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let mut result = match (use_mft, helper) {
             (false, _) => Err(anyhow::anyhow!("no administrator rights")),
             // A panic in the reader (a parser bug on a volume it misreads) falls back to the
@@ -254,7 +258,7 @@ impl Job {
             // Verbatim, so folders named `x.` or `x ` are listed themselves rather than their
             // `x` twin (or nothing): Win32 strips trailing dots and spaces from plain paths (FC-15).
             let root = crate::util::fs_path(&format!("{letter}:\\"));
-            result = walk::walk_volume(letter, &root, &self.progress, &skipped, &self.cancel);
+            result = walk::walk_volume(letter, &root, &self.progress, &skipped, &not_followed, &self.cancel);
         }
 
         match result {
@@ -266,6 +270,7 @@ impl Job {
                 self.update(|s| {
                     s.refreshing = false;
                     s.skipped = skipped.load(Ordering::Relaxed);
+                    s.not_followed = not_followed.load(Ordering::Relaxed);
                     s.cache_error = cache_error;
                 });
             }

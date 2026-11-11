@@ -23,6 +23,8 @@ struct Shared<'a> {
     /// Folders found but not finished, wherever they wait.
     pending: AtomicUsize,
     skipped: &'a AtomicUsize,
+    /// Folders listed but not walked because they are reparse points.
+    not_followed: &'a AtomicUsize,
     cancel: &'a AtomicBool,
 }
 
@@ -37,12 +39,15 @@ struct Raw {
 
 /// Indexes everything under `root` (normally `X:\`). Ids are handed out by an atomic counter so
 /// workers can enqueue subdirectories with their final id while a single collector fills the table.
-/// Folders and entries that cannot be read are left out and counted in `skipped`.
+/// Folders and entries that cannot be read are left out and counted in `skipped`; folders that are
+/// reparse points (junctions, symbolic links, mount points) are listed but not walked, and counted
+/// in `not_followed`.
 pub fn walk_volume(
     letter: char,
     root: &Path,
     progress: &AtomicUsize,
     skipped: &AtomicUsize,
+    not_followed: &AtomicUsize,
     cancel: &AtomicBool,
 ) -> anyhow::Result<VolumeIndex> {
     let start = Instant::now();
@@ -53,6 +58,7 @@ pub fn walk_volume(
         out_of_ids: AtomicBool::new(false),
         pending: AtomicUsize::new(1),
         skipped,
+        not_followed,
         cancel,
     };
     let (work_tx, work_rx) = unbounded::<(PathBuf, u32)>();
@@ -162,6 +168,8 @@ fn read_one_dir(
             } else {
                 local.push(job);
             }
+        } else if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT != 0 {
+            shared.not_followed.fetch_add(1, Ordering::Relaxed);
         }
         batch.push(Raw { idx, parent: dir_id, name, attrs, size, mtime });
         if batch.len() == BATCH {
@@ -222,7 +230,7 @@ mod tests {
         std::fs::write(root.join("a").join("b").join("two.rs"), "fn main() {}").unwrap();
 
         let skipped = AtomicUsize::new(0);
-        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicBool::new(false)).unwrap();
+        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(v.len(), 4);
@@ -249,7 +257,7 @@ mod tests {
         std::fs::write(root.join("sub2.").join("real.txt"), "x").unwrap();
 
         let skipped = AtomicUsize::new(0);
-        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicBool::new(false)).unwrap();
+        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         let path_of = |name: &str| -> Vec<String> {
@@ -259,6 +267,36 @@ mod tests {
         assert_eq!(path_of("inner.txt"), [r"T:\sub.\inner.txt"]);
         assert_eq!(path_of("real.txt"), [r"T:\sub2.\real.txt"]);
         assert_eq!(path_of("decoy.txt"), [r"T:\sub2\decoy.txt"]);
+    }
+
+    /// Junctions (like mount points and directory symbolic links) are listed but not walked, and
+    /// counted, so the status bar can say that their contents are not indexed there. They used
+    /// to be left out without any sign.
+    #[cfg(windows)]
+    #[test]
+    fn reparse_folders_are_counted() {
+        let root = std::env::temp_dir().join(format!("filecraft-walk-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real").join("file.txt"), "").unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("link"))
+            .arg(root.join("real"))
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J failed: {made:?}");
+
+        let (skipped, not_followed) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let v = walk_volume('T', &root, &AtomicUsize::new(0), &skipped, &not_followed, &AtomicBool::new(false)).unwrap();
+        let _ = std::fs::remove_dir(root.join("link"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let mut paths: Vec<String> = v.by_name.iter().map(|&i| v.full_path(i)).collect();
+        paths.sort();
+        assert_eq!(paths, [r"T:\link", r"T:\real", r"T:\real\file.txt"]);
+        assert_eq!(not_followed.load(Ordering::Relaxed), 1);
+        assert_eq!(skipped.load(Ordering::Relaxed), 0);
     }
 
     /// Runs `read_one_dir` alone and returns the batches it sent.
@@ -273,6 +311,7 @@ mod tests {
             out_of_ids: AtomicBool::new(false),
             pending: AtomicUsize::new(1),
             skipped,
+            not_followed: &AtomicUsize::new(0),
             cancel,
         };
         let (work_tx, _work_rx) = unbounded();
@@ -325,13 +364,14 @@ mod tests {
         let bad = dir.join(std::ffi::OsString::from_wide(&[0x61, 0xD800]));
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("inner.txt"), "").unwrap();
-        let skipped = AtomicUsize::new(0);
+        let (skipped, not_followed) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let (tx, rx) = unbounded();
         let shared = Shared {
             next_id: AtomicU32::new(1),
             out_of_ids: AtomicBool::new(false),
             pending: AtomicUsize::new(1),
             skipped: &skipped,
+            not_followed: &not_followed,
             cancel: &AtomicBool::new(false),
         };
         let (out_tx, out_rx) = unbounded();
@@ -342,6 +382,8 @@ mod tests {
         let names: Vec<String> = out_rx.iter().flatten().map(|r| r.name).collect();
         assert_eq!(names, ["?"]);
         assert_eq!(skipped.load(Ordering::Relaxed), 1);
+        // Not entered because of its name, not because it is a reparse point.
+        assert_eq!(not_followed.load(Ordering::Relaxed), 0);
         assert!(rx.try_recv().is_err());
     }
 
@@ -389,7 +431,8 @@ mod bench {
         let root = std::env::var("FILECRAFT_BENCH_ROOT").unwrap_or_else(|_| r"D:\".into());
         let letter = root.chars().next().unwrap().to_ascii_uppercase();
         let t = Instant::now();
-        let v = walk_volume(letter, Path::new(&root), &AtomicUsize::new(0), &AtomicUsize::new(0), &AtomicBool::new(false)).unwrap();
+        let v = walk_volume(letter, Path::new(&root), &AtomicUsize::new(0), &AtomicUsize::new(0), &AtomicUsize::new(0), &AtomicBool::new(false))
+            .unwrap();
         eprintln!("walk: {} entries in {:.2?} (build incl. sorting {:.2?})", v.len(), t.elapsed(), v.build_time);
 
         let path = std::env::temp_dir().join("filecraft-bench.idx");

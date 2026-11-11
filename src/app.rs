@@ -1722,6 +1722,12 @@ fn drive_chip(ui: &mut egui::Ui, s: &crate::indexer::VolumeStatus) {
             if s.skipped > 0 {
                 tip.push_str(&format!("\n{} items could not be read and are missing", group_digits(s.skipped)));
             }
+            if s.not_followed > 0 {
+                tip.push_str(&format!(
+                    "\n{} linked folders (junctions, symbolic links, mounted drives) were not entered",
+                    group_digits(s.not_followed)
+                ));
+            }
             if let Some(err) = &s.cache_error {
                 tip.push_str(&format!("\nThe index could not be cached: {err}"));
             }
