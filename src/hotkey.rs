@@ -518,8 +518,10 @@ mod platform {
                 };
                 state.register(hwnd, hotkey);
                 STATE.set(Some(Rc::new(state)));
-                add_tray_icon(hwnd);
+                // Before the icon: adding it waits for Explorer, which can take seconds while the
+                // taskbar restarts, and the caller is the UI thread. Nothing here needs the icon.
                 let _ = started_tx.send(Ok(hwnd as isize));
+                add_tray_icon(hwnd);
 
                 // SAFETY: the standard message loop; `msg` is zeroable and written by `GetMessageW`
                 // before it is read. The loop ends with the window (`PostQuitMessage`), or when the
