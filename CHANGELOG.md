@@ -147,6 +147,9 @@ All notable changes to this project are documented here. The format follows
 - When the quick search background thread ends unexpectedly while the window is hidden, FileCraft
   wakes up to bring the window back and say so. It used to depend on eframe happening to run the
   app's logic for a hidden window, so it could stay unreachable with no tray icon or hotkey.
+- The quick search bar hides its window through the message queue instead of with a synchronous
+  call made while its state is locked. Had Windows run the bar's UI again during that call,
+  FileCraft would have hung waiting for its own lock.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).

@@ -157,7 +157,8 @@ the background thread) lives in `logic`, and these two parts work without the wi
   behind a mutex, and it has its own `Searcher`. The main window passes it each new index snapshot.
   Showing and hiding use Win32 calls rather than viewport commands, so that winit's idea of the
   window stays consistent. Hiding happens on the bar's own thread (the hotkey thread only signals),
-  because only then does Windows return the foreground to the previous window.
+  because only then does Windows return the foreground to the previous window. It is queued with
+  `ShowWindowAsync` all the same, because the bar holds its state's lock while its UI runs.
 
 Calls the hotkey thread makes on the bar are asynchronous (`ShowWindowAsync`, `SWP_ASYNCWINDOWPOS`),
 because the main thread owns that window and a synchronous call would wait for it. For the same

@@ -178,7 +178,7 @@ mod platform {
         GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, IMAGE_ICON,
         IsWindowVisible, LoadImageW, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, ShowWindowAsync, TPM_RETURNCMD, TrackPopupMenu,
+        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindowAsync, TPM_RETURNCMD, TrackPopupMenu,
         TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_NULL, WNDCLASSW, WS_OVERLAPPED,
     };
 
@@ -298,12 +298,15 @@ mod platform {
         }
     }
 
-    /// Hides the bar, if it exists.
+    /// Hides the bar, if it exists. The bar calls this while holding its own lock, so the window
+    /// is hidden from the message loop rather than now: a synchronous call that made the event
+    /// loop run the bar's UI again would wait for that lock forever. It is still the bar's thread
+    /// that hides it, which is what returns the foreground to the previous window.
     pub fn hide_bar() {
         if let Some(bar) = find_bar() {
             // SAFETY: plain Win32 call on a window of this process.
             unsafe {
-                ShowWindow(bar, SW_HIDE);
+                ShowWindowAsync(bar, SW_HIDE);
             }
         }
     }
