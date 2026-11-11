@@ -153,6 +153,9 @@ All notable changes to this project are documented here. The format follows
 - The quick search bar takes the keyboard focus once it is actually on screen. The hotkey thread
   used to make it the foreground window before the busy UI thread had shown it, so while
   FileCraft was indexing or merging, keystrokes could go to an invisible window.
+- Pressing the quick search hotkey twice in quick succession closes the bar again. The hotkey
+  decided by whether the window was already visible, which lags behind showing and hiding it, so
+  a fast second press could open the bar again instead of closing it (and the other way round).
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).

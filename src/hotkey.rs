@@ -6,7 +6,7 @@
 //! the bar then takes the foreground, which Windows allows the process that received a hotkey.
 
 use std::fmt;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MOD_ALT: u32 = 0x1;
 const MOD_CONTROL: u32 = 0x2;
@@ -104,11 +104,50 @@ impl fmt::Display for Hotkey {
 /// What the hotkey thread tells the bar, which picks it up on its next frame.
 #[derive(Default)]
 pub struct BarSignals {
+    /// Whether the bar is meant to be open. The hotkey toggles this rather than reading the
+    /// window's visibility, which lags behind the asynchronous show and hide: a quick second press
+    /// would see the window still hidden and open it again instead of closing it.
+    shown: AtomicBool,
     /// The window is being shown: start afresh.
-    pub open: AtomicBool,
+    open: AtomicBool,
     /// The bar should close itself. It has to be the bar's own thread that hides the window: only
     /// then does Windows pass the foreground on to the window the user was in before.
-    pub close: AtomicBool,
+    close: AtomicBool,
+}
+
+/// What the bar has to do on its next frame: first close, then open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BarRequest {
+    pub close: bool,
+    pub open: bool,
+}
+
+impl BarSignals {
+    /// Flips whether the bar is meant to be open, for the hotkey, and asks the bar to follow.
+    /// Returns `true` if it is to open, when the caller shows the window.
+    pub fn toggle(&self) -> bool {
+        let open = !self.shown.fetch_xor(true, Ordering::AcqRel);
+        // Before the caller shows the window, so the first frame the bar paints starts afresh.
+        if open {
+            self.open.store(true, Ordering::Release);
+        } else {
+            self.close.store(true, Ordering::Release);
+        }
+        open
+    }
+
+    /// The bar closed itself: the next press opens it.
+    pub fn closed(&self) {
+        self.shown.store(false, Ordering::Release);
+    }
+
+    /// Takes what was asked since the bar last looked. Presses that came in between cancel out:
+    /// the bar opens again only if the last of them opened it.
+    pub fn take(&self) -> BarRequest {
+        let close = self.close.swap(false, Ordering::AcqRel);
+        let open = self.open.swap(false, Ordering::AcqRel) && self.shown.load(Ordering::Acquire);
+        BarRequest { close, open }
+    }
 }
 
 /// What the background thread asks of the app.
@@ -120,11 +159,11 @@ pub enum Event {
 }
 
 #[cfg(windows)]
-pub use platform::{Background, activate_running_instance, focus_bar, hide_bar};
+pub use platform::{Background, activate_running_instance, focus_bar, hide_bar, show_bar};
 
 /// Other platforms have no quick search: `start` fails, so the window just closes as usual.
 #[cfg(not(windows))]
-pub use stub::{Background, activate_running_instance, focus_bar, hide_bar};
+pub use stub::{Background, activate_running_instance, focus_bar, hide_bar, show_bar};
 
 #[cfg(not(windows))]
 mod stub {
@@ -150,6 +189,8 @@ mod stub {
 
     pub fn hide_bar() {}
 
+    pub fn show_bar() {}
+
     pub fn focus_bar() -> bool {
         true
     }
@@ -164,7 +205,6 @@ mod platform {
     use std::cell::{Cell, RefCell};
     use std::io;
     use std::rc::Rc;
-    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -262,15 +302,11 @@ mod platform {
             // busy. The requests are queued in order, so the window is placed before it shows. The
             // bar takes the foreground itself once it is on screen (`focus_bar`): here the show
             // has only been queued.
-            // SAFETY: plain Win32 calls on a window of this process; a window that has just been
-            // destroyed only makes them fail.
-            unsafe {
-                if IsWindowVisible(bar) != 0 {
-                    self.signals.close.store(true, Ordering::Release);
-                } else {
+            if self.signals.toggle() {
+                // SAFETY: plain Win32 calls on a window of this process; a window that has just
+                // been destroyed only makes them fail.
+                unsafe {
                     place_bar(bar);
-                    // Before showing it, so the first frame the bar paints starts afresh.
-                    self.signals.open.store(true, Ordering::Release);
                     ShowWindowAsync(bar, SW_SHOWNORMAL);
                 }
             }
@@ -312,6 +348,17 @@ mod platform {
             // SAFETY: plain Win32 call on a window of this process.
             unsafe {
                 ShowWindowAsync(bar, SW_HIDE);
+            }
+        }
+    }
+
+    /// Shows the bar again, after the bar's own thread has queued hiding it in the same frame:
+    /// queued behind that, this undoes it where the hotkey thread's earlier show would not.
+    pub fn show_bar() {
+        if let Some(bar) = find_bar() {
+            // SAFETY: plain Win32 call on a window of this process.
+            unsafe {
+                ShowWindowAsync(bar, SW_SHOWNORMAL);
             }
         }
     }
@@ -643,5 +690,34 @@ mod tests {
     #[test]
     fn the_default_is_valid() {
         assert_eq!(Hotkey::parse(DEFAULT_HOTKEY).unwrap().to_string(), DEFAULT_HOTKEY);
+    }
+
+    /// A second press before the bar has even shown closes it, whatever the window's visibility.
+    #[test]
+    fn a_quick_second_press_closes_the_bar_again() {
+        let signals = BarSignals::default();
+        assert!(signals.toggle());
+        assert!(!signals.toggle());
+        assert_eq!(signals.take(), BarRequest { close: true, open: false });
+    }
+
+    #[test]
+    fn closing_and_reopening_before_the_bar_looks_reopens_it() {
+        let signals = BarSignals::default();
+        signals.toggle();
+        signals.take();
+        assert!(!signals.toggle());
+        assert!(signals.toggle());
+        assert_eq!(signals.take(), BarRequest { close: true, open: true });
+    }
+
+    #[test]
+    fn after_closing_itself_the_bar_opens_on_the_next_press() {
+        let signals = BarSignals::default();
+        signals.toggle();
+        signals.take();
+        signals.closed();
+        assert!(signals.toggle());
+        assert_eq!(signals.take(), BarRequest { close: false, open: true });
     }
 }
