@@ -1161,7 +1161,6 @@ impl FileCraftApp {
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.editor_focused = false;
         let Some(hit) = self.selected else {
             ui.add_space(12.0);
             ui.weak("Select a result to preview it here.");
@@ -1722,6 +1721,9 @@ impl eframe::App for FileCraftApp {
         if self.pending.is_none() && self.editor_confirm.is_none() && !self.close_notice {
             self.handle_keys(&ctx);
         }
+        // Set again by the preview pane while it shows the focused editor, so hiding the pane
+        // (F2) while typing in it does not leave the result keys switched off.
+        self.editor_focused = false;
         self.poll();
         if self.indexer.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
