@@ -117,6 +117,16 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+/// Today's date in local time.
+pub fn local_today() -> (i64, u32, u32) {
+    civil_from_days((now_filetime() + local_offset() - UNIX_EPOCH_TICKS).div_euclid(TICKS_PER_DAY))
+}
+
+/// The calendar date `days` days after `date` (before it when negative).
+pub fn add_days((y, m, d): (i64, u32, u32), days: i64) -> (i64, u32, u32) {
+    civil_from_days(days_from_civil(y, m, d) + days)
+}
+
 /// `2026-10-13 14:05` in local time; empty for unknown times.
 pub fn format_filetime(ft: i64, offset: i64) -> String {
     if ft <= 0 {
