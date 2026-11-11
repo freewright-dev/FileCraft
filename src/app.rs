@@ -44,6 +44,15 @@ struct Saving {
     then: Option<Pending>,
 }
 
+/// An elevated launch of the external editor waiting for the user's confirmation.
+struct EditorConfirm {
+    /// The editor command line; its arguments are passed to the program.
+    command: String,
+    file: PathBuf,
+    /// The program the editor command resolved to, which is what runs once confirmed.
+    program: Result<PathBuf, String>,
+}
+
 /// What closing the window comes to, once no edits stand in the way.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CloseStep {
@@ -179,11 +188,12 @@ pub struct FileCraftApp {
     close_notice_shown: bool,
 
     editor: String,
-    /// Elevated only: the editor command the user agreed to run as administrator this session.
-    /// The command comes from settings or the environment, which unelevated code can change.
-    editor_confirmed: Option<String>,
+    /// Elevated only: the editor command the user agreed to run as administrator this session,
+    /// and the program it resolved to then. The command comes from settings or the environment,
+    /// which unelevated code can change.
+    editor_confirmed: Option<(String, PathBuf)>,
     /// Elevated only: a file waiting for that confirmation before it opens in the editor.
-    editor_confirm: Option<PathBuf>,
+    editor_confirm: Option<EditorConfirm>,
     excluded: BTreeSet<char>,
     max_age_minutes: u64,
     show_settings: bool,
@@ -626,12 +636,19 @@ impl FileCraftApp {
             RowAction::Reveal => shell_path.and_then(|p| actions::reveal(&p)),
             RowAction::Properties => shell_path.and_then(|p| actions::properties(&p)),
             RowAction::EditExternal => shell_path.and_then(|p| {
-                // Elevated, the editor would run as administrator: confirm the command first (FC-18).
-                if self.indexer.elevated && self.editor_confirmed.as_deref() != Some(self.editor.as_str()) {
-                    self.editor_confirm = Some(p);
+                // Resolved once: the program confirmed is the program launched (FC-18).
+                let program = actions::editor_program(&self.editor);
+                // Elevated, the editor would run as administrator: confirm the command first. A
+                // command that now resolves to another program is asked about again.
+                let confirmed = self.editor_confirmed.as_ref().is_some_and(|(command, confirmed)| {
+                    *command == self.editor && program.as_ref().is_ok_and(|p| p == confirmed)
+                });
+                if self.indexer.elevated && !confirmed {
+                    let program = program.map_err(|e| e.to_string());
+                    self.editor_confirm = Some(EditorConfirm { command: self.editor.clone(), file: p, program });
                     Ok(())
                 } else {
-                    actions::edit_externally(&self.editor, &p)
+                    actions::edit_with(&program?, &self.editor, &p)
                 }
             }),
             RowAction::CopyPath => {
@@ -1372,24 +1389,24 @@ impl FileCraftApp {
 
     /// Asks before an elevated instance runs the configured editor as administrator. The command
     /// comes from saved settings or the environment, both of which unelevated programs of the same
-    /// user can change, so it is shown with the program it resolves to (FC-18).
+    /// user can change, so it is shown with the program it resolved to, and confirming runs exactly
+    /// that program (FC-18).
     fn editor_confirm_modal(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.editor_confirm.clone() else { return };
-        let program = actions::editor_program(&self.editor);
+        let Some(confirm) = &self.editor_confirm else { return };
         let mut choice = None;
         let modal = egui::Modal::new(egui::Id::new("confirm-elevated-editor")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("Run the editor as administrator?");
             ui.label("FileCraft is running as administrator, so the external editor would too.");
             ui.add_space(4.0);
-            ui.label(RichText::new(&self.editor).monospace());
-            match &program {
+            ui.label(RichText::new(&confirm.command).monospace());
+            match &confirm.program {
                 Ok(p) => ui.weak(format!("Program: {}", p.display())),
-                Err(e) => ui.colored_label(Color32::RED, e.to_string()),
+                Err(e) => ui.colored_label(Color32::RED, e),
             };
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(program.is_ok(), egui::Button::new("Run as administrator")).clicked() {
+                if ui.add_enabled(confirm.program.is_ok(), egui::Button::new("Run as administrator")).clicked() {
                     choice = Some(true);
                 }
                 if ui.button("Cancel").clicked() {
@@ -1401,10 +1418,11 @@ impl FileCraftApp {
             choice = Some(false);
         }
         let Some(run) = choice else { return };
-        self.editor_confirm = None;
+        let Some(EditorConfirm { command, file, program: Ok(program) }) = self.editor_confirm.take() else { return };
         if run {
-            self.editor_confirmed = Some(self.editor.clone());
-            if let Err(e) = actions::edit_externally(&self.editor, &path) {
+            let result = actions::edit_with(&program, &command, &file);
+            self.editor_confirmed = Some((command, program));
+            if let Err(e) = result {
                 self.set_status(format!("Failed: {e}"));
             }
         }

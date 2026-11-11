@@ -124,7 +124,9 @@ first frame.
 - **External editor** (Ctrl+E) opens the file in the editor set in **Settings** (default: the
   `FILECRAFT_EDITOR`, `VISUAL` or `EDITOR` environment variable, else Notepad). For VS Code use `code`.
   When FileCraft runs as administrator the editor would too, so the first launch of each editor
-  command in a session shows the command and its program and asks before running it.
+  command in a session shows the command and its program and asks before running it. Confirming
+  runs exactly the program shown; if the command later resolves to a different program, FileCraft
+  asks again.
 - FileCraft refuses to save its cache or a backup copy when its data folder
   (`%LOCALAPPDATA%\FileCraft`, `index` or `backup`) is a junction or symbolic link, so those
   writes cannot be redirected to another folder.

@@ -268,6 +268,11 @@ All notable changes to this project are documented here. The format follows
   from, so a program planted there could run instead, and the program it reported could differ
   from the one Windows then started. Such entries are skipped, a relative editor path is refused,
   and the editor is started by the full path it was resolved to.
+- When FileCraft runs as administrator, confirming the external editor now runs exactly the
+  program the confirmation showed. Before, the command was looked up again by name after you
+  confirmed it, so the program that ran was not bound to the one you had checked, and later
+  launches of the same command were never checked again. A confirmed command that now resolves to
+  another program is asked about again (FC-18).
 - Fast NTFS indexing no longer runs the whole window as administrator (FC-18). **Run as admin**
   restarted FileCraft elevated, so opening files, editing, saving, backups, cache writes and the
   external editor all ran with administrator rights on state that unelevated programs can change.
