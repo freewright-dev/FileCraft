@@ -194,6 +194,8 @@ pub struct FileCraftApp {
     editor_confirmed: Option<(String, PathBuf)>,
     /// Elevated only: a file waiting for that confirmation before it opens in the editor.
     editor_confirm: Option<EditorConfirm>,
+    /// Failures of shell actions (open, show in folder, properties), which run on worker threads.
+    shell_errors: (std::sync::mpsc::Sender<String>, std::sync::mpsc::Receiver<String>),
     excluded: BTreeSet<char>,
     max_age_minutes: u64,
     show_settings: bool,
@@ -285,6 +287,7 @@ impl FileCraftApp {
             editor,
             editor_confirmed: None,
             editor_confirm: None,
+            shell_errors: std::sync::mpsc::channel(),
             excluded,
             max_age_minutes,
             show_settings: false,
@@ -632,9 +635,10 @@ impl FileCraftApp {
         };
         let name = v.name(hit.idx).to_string();
         let result = match action {
-            RowAction::Open => shell_path.and_then(|p| actions::open(&p)),
-            RowAction::Reveal => shell_path.and_then(|p| actions::reveal(&p)),
-            RowAction::Properties => shell_path.and_then(|p| actions::properties(&p)),
+            // The shell can block for seconds (slow share, placeholder, handler load): worker thread.
+            RowAction::Open => shell_path.and_then(|p| self.shell_in_background(ctx, move || actions::open(&p))),
+            RowAction::Reveal => shell_path.and_then(|p| self.shell_in_background(ctx, move || actions::reveal(&p))),
+            RowAction::Properties => shell_path.and_then(|p| self.shell_in_background(ctx, move || actions::properties(&p))),
             RowAction::EditExternal => shell_path.and_then(|p| {
                 // Resolved once: the program confirmed is the program launched (FC-18).
                 let program = actions::editor_program(&self.editor);
@@ -676,6 +680,29 @@ impl FileCraftApp {
             }
         };
         if let Err(e) = result {
+            self.set_status(format!("Failed: {e}"));
+        }
+    }
+
+    /// Runs a shell action on a worker thread; a failure reaches the status bar through
+    /// [`Self::poll_shell`].
+    fn shell_in_background(
+        &self,
+        ctx: &egui::Context,
+        action: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let errors = self.shell_errors.0.clone();
+        let repaint = ctx.clone();
+        actions::in_background(action, move |result| {
+            if let Err(e) = result {
+                let _ = errors.send(e.to_string());
+                repaint.request_repaint();
+            }
+        })
+    }
+
+    fn poll_shell(&mut self) {
+        while let Ok(e) = self.shell_errors.1.try_recv() {
             self.set_status(format!("Failed: {e}"));
         }
     }
@@ -1747,6 +1774,7 @@ impl eframe::App for FileCraftApp {
         self.poll();
         self.poll_save(ctx);
         self.poll_helper_start();
+        self.poll_shell();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

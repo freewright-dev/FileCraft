@@ -9,31 +9,94 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
-/// `ShellExecuteW` with the given verb (`open`, `runas`, …).
-#[cfg(windows)]
-fn shell_execute(verb: &str, file: &str, params: Option<&str>) -> io::Result<()> {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let (verb, file) = (wide(verb), wide(file));
-    let params = params.map(wide);
-    // SAFETY: all strings are NUL-terminated UTF-16 and outlive the call.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            file.as_ptr(),
-            params.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // Values above 32 mean success; the others are error codes, and the thread's last error is
-    // not reliably set, so it is not used (MIN-04).
-    let code = result as isize;
-    if code > 32 { Ok(()) } else { Err(shell_error(code)) }
+/// Runs a shell action (open, reveal, properties) on a short-lived thread and hands its result
+/// to `done` there. The shell resolves associations, loads handlers and builds item lists for
+/// the path, which takes seconds on a slow network share or a cloud placeholder, so these calls
+/// must not block the UI thread. The thread enters a single-threaded COM apartment, which shell
+/// handlers expect, and [`shell_execute`] waits for the launch to finish before the thread ends.
+pub fn in_background(
+    action: impl FnOnce() -> io::Result<()> + Send + 'static,
+    done: impl FnOnce(io::Result<()>) + Send + 'static,
+) -> io::Result<()> {
+    std::thread::Builder::new()
+        .name("shell".into())
+        .spawn(move || {
+            #[cfg(windows)]
+            let _com = ComApartment::enter();
+            done(action());
+        })
+        .map(|_| ())
 }
 
-/// Describes a `ShellExecuteW` failure code (0 or an `ERROR_*` / `SE_ERR_*` value up to 32).
+/// COM initialised on the current thread until dropped.
+#[cfg(windows)]
+struct ComApartment {
+    entered: bool,
+}
+
+#[cfg(windows)]
+impl ComApartment {
+    fn enter() -> ComApartment {
+        use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+        // SAFETY: plain call; a success (including S_FALSE) is balanced by `CoUninitialize` in drop.
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };
+        ComApartment { entered: hr >= 0 }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.entered {
+            // SAFETY: balances the successful `CoInitializeEx` on this same thread.
+            unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+/// `ShellExecuteExW` with the given verb (`open`, `properties`, …) and extra `SEE_MASK_*` flags.
+/// `SEE_MASK_NOASYNC` makes it return only once the launch (DDE included) is done, as required
+/// on a thread that ends right after, like the ones [`in_background`] starts. The shell may show
+/// its own UI (the "How do you want to open this file?" dialog, error messages).
+#[cfg(windows)]
+fn shell_execute(verb: &str, file: &Path, mask: u32) -> io::Result<()> {
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let verb = wide(verb);
+    let file = wide(&file.to_string_lossy());
+    // SAFETY: zero is a valid initial state for this plain struct.
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOASYNC | mask;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    // SAFETY: `info` is initialised and its strings outlive the call.
+    if unsafe { ShellExecuteExW(&mut info) } != 0 {
+        return Ok(());
+    }
+    let last = io::Error::last_os_error();
+    shell_failure(last, info.hInstApp as isize).map_or(Ok(()), Err)
+}
+
+/// The error to report for a failed `ShellExecuteExW`, given the thread's last error and
+/// `hInstApp`. `None` when the last error is `ERROR_CANCELLED`: the shell has already shown its
+/// error, or the user cancelled one of its prompts, so there is nothing more to say. Otherwise
+/// `hInstApp` holds ShellExecute's own code, which is preferred over the last error (MIN-04);
+/// that is the fallback when there is no such code.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn shell_failure(last: io::Error, inst_app: isize) -> Option<io::Error> {
+    const ERROR_CANCELLED: i32 = 1223;
+    if last.raw_os_error() == Some(ERROR_CANCELLED) {
+        None
+    } else if (1..=32).contains(&inst_app) {
+        Some(shell_error(inst_app))
+    } else {
+        Some(last)
+    }
+}
+
+/// Describes a ShellExecute failure code (0 or an `ERROR_*` / `SE_ERR_*` value up to 32).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn shell_error(code: isize) -> io::Error {
     let message = match code {
@@ -63,7 +126,7 @@ fn shell_error(code: isize) -> io::Error {
 pub fn open(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        shell_execute("open", &path.to_string_lossy(), None)
+        shell_execute("open", path, 0)
     }
     #[cfg(not(windows))]
     {
@@ -117,22 +180,7 @@ fn select_arg(path: &Path) -> io::Result<String> {
 pub fn properties(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        let verb = wide("properties");
-        let file = wide(&path.to_string_lossy());
-        // SAFETY: zero is a valid initial state for this plain struct.
-        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
-        info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
-        info.fMask = SEE_MASK_INVOKEIDLIST;
-        info.lpVerb = verb.as_ptr();
-        info.lpFile = file.as_ptr();
-        info.nShow = SW_SHOWNORMAL;
-        // SAFETY: `info` is initialised and its strings outlive the call.
-        if unsafe { ShellExecuteExW(&mut info) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        shell_execute("properties", path, windows_sys::Win32::UI::Shell::SEE_MASK_INVOKEIDLIST)
     }
     #[cfg(not(windows))]
     {
@@ -302,6 +350,31 @@ mod tests {
         assert_eq!(shell_error(2).kind(), io::ErrorKind::NotFound);
         assert_eq!(shell_error(5).kind(), io::ErrorKind::PermissionDenied);
         assert!(shell_error(17).to_string().contains("17"));
+    }
+
+    /// Shell actions ran on the UI thread. They now run on a worker, and a failure comes back
+    /// from it. (A refused Explorer argument fails before any shell UI could appear.)
+    #[cfg(windows)]
+    #[test]
+    fn shell_actions_report_failures_from_a_worker_thread() {
+        let caller = std::thread::current().id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let quoted = Path::new(r#"C:\dir\a" /root,"C:\Windows"#);
+        in_background(move || reveal(quoted), move |result| tx.send((std::thread::current().id(), result)).unwrap()).unwrap();
+        let (worker, result) = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_ne!(worker, caller);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// When the shell has shown its own error (or the user cancelled its prompt), it reports
+    /// `ERROR_CANCELLED`; that is not reported a second time in the status bar.
+    #[test]
+    fn errors_the_shell_already_showed_are_not_reported_again() {
+        assert!(shell_failure(io::Error::from_raw_os_error(1223), 2).is_none());
+        let not_found = shell_failure(io::Error::from_raw_os_error(2), 2).unwrap();
+        assert_eq!(not_found.to_string(), "file not found");
+        let other = shell_failure(io::Error::from_raw_os_error(1155), 42).unwrap();
+        assert_eq!(other.raw_os_error(), Some(1155));
     }
 
     /// FC-17: a quote in the path used to end Explorer's argument and add switches of its own.

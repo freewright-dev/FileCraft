@@ -101,6 +101,11 @@ All notable changes to this project are documented here. The format follows
   failed save, or one another program held open when the save tried to delete it, stayed there for
   good; FileCraft now deletes copies older than 7 days when it starts. Like the other writes there,
   the cleanup refuses to work through a junction or symbolic link.
+- Open, Show in folder and Properties no longer freeze the window. They ran on the UI thread, where
+  looking up the program or building the properties dialog for an item on a slow network share or
+  a cloud placeholder could hang FileCraft for seconds. They now run in the background. Windows'
+  own dialogs, such as choosing a program for a file type without one, still appear, and other
+  failures are reported in the status bar as before.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor
