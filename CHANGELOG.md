@@ -89,6 +89,10 @@ All notable changes to this project are documented here. The format follows
 - A malformed image that makes the decoder panic no longer stops previews. The panic ended the
   preview thread, so no other item previewed again (and release builds closed FileCraft, losing
   unsaved edits); now the pane shows "Cannot show image" for that file.
+- Selecting a cloud or archive placeholder that is recalled when it is opened (the
+  "recall on open" attribute some sync and storage tiering providers use) no longer downloads it.
+  Only offline and recall-on-access placeholders were skipped before; now these get the same
+  "not fully available on this device" message instead of a preview.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor

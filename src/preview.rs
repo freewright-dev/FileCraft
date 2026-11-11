@@ -572,19 +572,27 @@ fn catch_decoder_panic<T>(decode: impl FnOnce() -> Result<T, String>) -> Result<
         .unwrap_or_else(|_| Err("the image decoder failed on this file".into()))
 }
 
-/// Offline or recall-on-access files (cloud placeholders) would be downloaded by reading them.
+/// Offline, recall-on-open or recall-on-access files (cloud and HSM placeholders) would be
+/// downloaded by opening or reading them.
 fn is_cloud_placeholder(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS};
-        meta.file_attributes() & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0
+        is_placeholder_attributes(meta.file_attributes())
     }
     #[cfg(not(windows))]
     {
         let _ = meta;
         false
     }
+}
+
+#[cfg(windows)]
+fn is_placeholder_attributes(attributes: u32) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
+    };
+    attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0
 }
 
 /// Opens the existing file for a save. Other programs may still read it, but on Windows they
@@ -1139,5 +1147,20 @@ mod tests {
         fs::remove_file(text).unwrap();
         fs::remove_file(image).unwrap();
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// Recall-on-open placeholders were opened and read, which downloads them. Only a sync
+    /// provider can set the attribute, so the check is tested on attribute values.
+    #[cfg(windows)]
+    #[test]
+    fn every_placeholder_attribute_skips_the_preview() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            FILE_ATTRIBUTE_RECALL_ON_OPEN,
+        };
+        for attribute in [FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS] {
+            assert!(is_placeholder_attributes(attribute | FILE_ATTRIBUTE_ARCHIVE), "{attribute:#x}");
+        }
+        assert!(!is_placeholder_attributes(FILE_ATTRIBUTE_ARCHIVE));
     }
 }
