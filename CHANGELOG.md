@@ -158,6 +158,9 @@ All notable changes to this project are documented here. The format follows
 - When the preview went away while a save was running, finishing the save no longer drops what
   waited for it: closing the window or switching to another result now goes ahead, and the status
   bar reports whether the file was saved.
+- With results sorted by name, keeping the selected item selected when new results arrive no
+  longer checks every result: it looks only at the results with the same name. Clearing the query
+  on a large index used to compare the name of every entry.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

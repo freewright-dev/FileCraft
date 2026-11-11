@@ -7,7 +7,7 @@ use crate::indexer::{Drive, IndexEvent, Indexer, Phase, fixed_drives};
 use crate::mft_helper::MftHelper;
 use crate::preview::{Content, Preview, PreviewLoader, SaveError};
 use crate::quick_bar::{self, QuickBar};
-use crate::search::{Hit, SearchOptions, Searcher, Sort};
+use crate::search::{Hit, SearchOptions, Searcher, Sort, find_row};
 use crate::util::{format_filetime, format_size, fs_path, group_digits, local_offset, win32_alias};
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -495,7 +495,7 @@ impl FileCraftApp {
             self.search_time = res.elapsed;
             self.hits = res.hits;
             self.shown = res.index;
-            self.restore_selection();
+            self.restore_selection(res.sort);
         }
 
         if let Some(preview) = self.preview_loader.poll()
@@ -516,14 +516,11 @@ impl FileCraftApp {
     }
 
     /// Finds the previously selected item in the new results (by name, then full path).
-    fn restore_selection(&mut self) {
+    fn restore_selection(&mut self, sort: Sort) {
         self.selected = None;
         self.selected_row = None;
-        let Some((lower_name, path)) = self.selected_path.clone() else { return };
-        let found = self.hits.iter().position(|h| {
-            let v = self.shown.volume(h.vol);
-            v.lower_name(h.idx) == lower_name && v.full_path(h.idx) == path
-        });
+        let Some((lower_name, path)) = &self.selected_path else { return };
+        let found = find_row(&self.shown, &self.hits, sort, lower_name, path);
         match found {
             Some(row) => {
                 self.selected_row = Some(row);
