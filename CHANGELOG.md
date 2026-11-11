@@ -152,6 +152,9 @@ All notable changes to this project are documented here. The format follows
 - Hiding the preview pane (F2 or *View → Preview pane*) while typing in its editor no longer
   leaves the arrow keys, Enter, F4, Ctrl+E and the other result shortcuts switched off until the
   pane was shown again and the editor lost focus.
+- Pressing Enter, F4, the arrow keys and the other result shortcuts while typing in a Settings
+  field (such as *External editor* or the hotkey) now edits the field. Enter used to open the
+  selected result and the key never reached the field.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

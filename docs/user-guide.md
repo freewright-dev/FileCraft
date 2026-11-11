@@ -148,6 +148,10 @@ Right-click a result, use the preview pane buttons, or the keyboard:
 | `F2` | Toggle the preview pane |
 | `F5` | Re-index all drives |
 
+The selection keys, the `Enter` keys, `F4`, `Ctrl+E`, `Ctrl+Shift+C` and `Esc` act on the results
+while the search box or the preview text has focus. In the inline editor and the fields of
+**Settings** they act on the text instead (`Esc` leaves the field).
+
 Windows rewrites some names when a program opens them: a trailing dot or space is dropped, and
 `CON`, `NUL`, `CONIN$`, `COM1`, `COM¹` and similar are devices. FileCraft previews and edits such
 items themselves. It refuses to open them, show them in Explorer, show their properties or pass

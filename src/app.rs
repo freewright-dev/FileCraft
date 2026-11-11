@@ -27,6 +27,10 @@ const KEY_HOTKEY: &str = "quick_search_hotkey";
 const KEY_CLOSE_NOTICE_SHOWN: &str = "close_notice_shown";
 /// Upper end of the "re-index when older than" setting: one week.
 const MAX_AGE_LIMIT_MINUTES: u64 = 10_080;
+/// The text fields the result keys (arrows, Enter, F4 …) keep working in: the search box and the
+/// read-only preview text. Any other focused text field gets those keys itself.
+const SEARCH_BOX_ID: &str = "search_box";
+const PREVIEW_TEXT_ID: &str = "preview_text";
 
 enum Pending {
     Select(usize),
@@ -147,7 +151,6 @@ pub struct FileCraftApp {
     preview_loader: PreviewLoader,
     preview_request: Option<PathBuf>,
     edit_when_ready: bool,
-    editor_focused: bool,
     pending: Option<Pending>,
     saving: Option<Saving>,
     /// The NTFS helper being started (UAC prompt, connection).
@@ -253,7 +256,6 @@ impl FileCraftApp {
             preview_loader,
             preview_request: None,
             edit_when_ready: false,
-            editor_focused: false,
             pending: None,
             saving: None,
             helper_start: None,
@@ -782,7 +784,10 @@ impl FileCraftApp {
     // ── Keyboard ──
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let editing_text = self.editor_focused;
+        let editing_text = ctx.text_edit_focused()
+            && ctx
+                .memory(|m| m.focused())
+                .is_some_and(|id| id != egui::Id::new(SEARCH_BOX_ID) && id != egui::Id::new(PREVIEW_TEXT_ID));
         let mut nav: isize = 0;
         let mut jump: Option<bool> = None; // Some(true) = end, Some(false) = start
         let mut action = None;
@@ -951,6 +956,7 @@ impl FileCraftApp {
             let resp = ui.add_sized(
                 [ui.available_width(), 28.0],
                 egui::TextEdit::singleline(&mut self.query)
+                    .id(egui::Id::new(SEARCH_BOX_ID))
                     .hint_text("Search everything…   e.g.  report ext:pdf   *.rs   size:>100mb   dm:today   folder:src")
                     .font(egui::TextStyle::Body)
                     .vertical_align(Align::Center),
@@ -1270,7 +1276,6 @@ impl FileCraftApp {
                     if resp.changed() {
                         p.dirty = true;
                     }
-                    self.editor_focused = resp.has_focus();
                 });
             } else {
                 show_content(ui, &mut p.content);
@@ -1586,7 +1591,12 @@ fn show_content(ui: &mut egui::Ui, content: &mut Content) {
             }
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 let mut view: &str = text;
-                ui.add(egui::TextEdit::multiline(&mut view).code_editor().desired_width(f32::INFINITY));
+                ui.add(
+                    egui::TextEdit::multiline(&mut view)
+                        .id(egui::Id::new(PREVIEW_TEXT_ID))
+                        .code_editor()
+                        .desired_width(f32::INFINITY),
+                );
             });
         }
         Content::Image(image) => {
@@ -1721,9 +1731,6 @@ impl eframe::App for FileCraftApp {
         if self.pending.is_none() && self.editor_confirm.is_none() && !self.close_notice {
             self.handle_keys(&ctx);
         }
-        // Set again by the preview pane while it shows the focused editor, so hiding the pane
-        // (F2) while typing in it does not leave the result keys switched off.
-        self.editor_focused = false;
         self.poll();
         if self.indexer.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
