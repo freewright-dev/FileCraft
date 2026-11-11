@@ -163,7 +163,9 @@ them to the external editor, since those would act on a different item.
 
 - **External editor** — command line used by Ctrl+E; the file path is appended. The program must
   be an `.exe`, `.com`, `.bat` or `.cmd` on `PATH` or a full path (quote paths with spaces, e.g.
-  `"C:\Program Files\Editor\editor.exe" -n`). It runs directly, not through a shell.
+  `"C:\Program Files\Editor\editor.exe" -n`). It runs directly, not through a shell. It is never
+  looked up in the current folder: relative paths are refused, and empty or relative `PATH`
+  entries are skipped.
 - **Drives** — untick a drive to stop indexing and searching it.
 - **Re-index on startup when older than** — cache age in minutes, up to 10,080 (one week); 0
   re-indexes on every start.

@@ -216,12 +216,19 @@ fn has_extension(path: &Path, exts: &[&str]) -> bool {
     path.extension().is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
-/// Finds the file `program` names, like cmd would but without searching the current directory:
-/// a path is taken as given, a bare name is looked up on PATH, and PATHEXT extensions are tried.
+/// Finds the file `program` names, like cmd would but never relative to the current directory:
+/// a full path is taken as given, a bare name is looked up in the absolute `PATH` entries, and
+/// PATHEXT extensions are tried. The result is absolute, and it is exactly what gets launched.
 #[cfg(windows)]
 fn resolve_program(program: &str) -> io::Result<std::path::PathBuf> {
-    use std::path::PathBuf;
     let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    resolve_program_in(program, std::env::var_os("PATH").as_deref(), &pathext)
+}
+
+/// [`resolve_program`] with the `PATH` and `PATHEXT` values given.
+#[cfg(windows)]
+fn resolve_program_in(program: &str, path_var: Option<&std::ffi::OsStr>, pathext: &str) -> io::Result<std::path::PathBuf> {
+    use std::path::PathBuf;
     let exts: Vec<&str> = pathext
         .split(';')
         .map(|e| e.trim().trim_start_matches('.'))
@@ -241,11 +248,20 @@ fn resolve_program(program: &str) -> io::Result<std::path::PathBuf> {
             .find(|p| p.is_file())
     };
     let found = if program.contains(['\\', '/', ':']) {
+        if !Path::new(program).is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("editor “{program}” is a relative path; give its full path or a name on PATH"),
+            ));
+        }
         find(PathBuf::from(program))
     } else {
-        std::env::var_os("PATH")
+        // Empty and relative entries (`a;;b`, `.\bin`) would be looked up in the current
+        // directory, and the program found there is the one that would run.
+        path_var
             .iter()
             .flat_map(std::env::split_paths)
+            .filter(|dir| dir.is_absolute())
             .find_map(|dir| find(dir.join(program)))
     };
     found.ok_or_else(|| {
@@ -291,6 +307,29 @@ mod tests {
         let cmd = resolve_program("cmd").unwrap();
         assert!(cmd.file_name().unwrap().eq_ignore_ascii_case("cmd.exe"), "{}", cmd.display());
         assert!(resolve_program("filecraft-no-such-editor").is_err());
+    }
+
+    /// Empty and relative `PATH` entries, and relative editor paths, used to be resolved against
+    /// the current directory, so a program planted there was the one that ran.
+    #[cfg(windows)]
+    #[test]
+    fn never_resolves_against_the_current_directory() {
+        use std::ffi::OsString;
+        let rel = format!(r"target\filecraft-relative-path-{}", std::process::id());
+        let dir = std::env::current_dir().unwrap().join(&rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("planted.cmd"), "@echo off\r\n").unwrap();
+
+        let relative_entries = OsString::from(format!(";{rel};.\\{rel}"));
+        let from_relative = resolve_program_in("planted", Some(&relative_entries), ".cmd");
+        let explicit_relative = resolve_program_in(&format!(r"{rel}\planted.cmd"), None, ".cmd");
+        let absolute_entry = OsString::from(format!(";{}", dir.display()));
+        let from_absolute = resolve_program_in("planted", Some(&absolute_entry), ".cmd");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(from_relative.is_err(), "{from_relative:?}");
+        assert!(explicit_relative.is_err(), "{explicit_relative:?}");
+        assert_eq!(from_absolute.unwrap(), dir.join("planted.cmd"));
     }
 
     /// FC-01: shell syntax in a file name must reach a `.cmd` editor shim as one literal argument.
