@@ -16,7 +16,7 @@
 //! - `path:foo`        force a term to match the full path
 
 use crate::index::{Index, SortKey, VolumeIndex, thread_count};
-use crate::util::{TICKS_PER_DAY, TICKS_PER_SEC, local_midnight, local_midnight_today, now_filetime, parse_date};
+use crate::util::{TICKS_PER_SEC, add_days, local_midnight, local_midnight_today, local_today, now_filetime, parse_date};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use globset::{GlobBuilder, GlobMatcher};
 use memchr::memmem;
@@ -325,29 +325,29 @@ fn parse_bytes(s: &str) -> Result<i64, String> {
 
 fn parse_date_cmp(value: &str) -> Result<Cmp, String> {
     let v = value.trim().to_ascii_lowercase();
-    let today = local_midnight_today();
+    // Days are calendar days: each ends at the next date's midnight, not 24 hours after its own,
+    // so a day with a daylight-saving change (23 or 25 hours) keeps its true end.
     match v.as_str() {
-        "today" => return Ok(Cmp::Ge(today)),
-        "yesterday" => return Ok(Cmp::Range(today - TICKS_PER_DAY, today)),
+        "today" => return Ok(Cmp::Ge(local_midnight_today())),
+        "yesterday" => return Ok(Cmp::Range(midnight(add_days(local_today(), -1)), local_midnight_today())),
         _ => {}
     }
     if let Some((lo, hi)) = v.split_once("..") {
-        return Ok(Cmp::Range(day_start(lo)?, day_start(hi)? + TICKS_PER_DAY));
+        return Ok(Cmp::Range(midnight(day(lo)?), day_end(day(hi)?)));
     }
     for (prefix, ctor) in [(">=", Cmp::Ge as fn(i64) -> Cmp), ("<=", Cmp::Le), (">", Cmp::Gt), ("<", Cmp::Lt)] {
         if let Some(rest) = v.strip_prefix(prefix) {
-            let start = day_start(rest)?;
+            let date = day(rest)?;
             // `>date` means after that whole day, `<=date` includes it.
             return Ok(match prefix {
-                ">" => Cmp::Ge(start + TICKS_PER_DAY),
-                "<=" => Cmp::Lt(start + TICKS_PER_DAY),
-                _ => ctor(start),
+                ">" => Cmp::Ge(day_end(date)),
+                "<=" => Cmp::Lt(day_end(date)),
+                _ => ctor(midnight(date)),
             });
         }
     }
-    if let Some(day) = parse_date(&v) {
-        let start = local_midnight(day.0, day.1, day.2);
-        return Ok(Cmp::Range(start, start + TICKS_PER_DAY));
+    if let Some(date) = parse_date(&v) {
+        return Ok(Cmp::Range(midnight(date), day_end(date)));
     }
     // Relative: last N hours/days/weeks/years.
     let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
@@ -369,9 +369,17 @@ fn parse_date_cmp(value: &str) -> Result<Cmp, String> {
     Ok(Cmp::Ge(now_filetime().saturating_sub(span).max(0)))
 }
 
-fn day_start(s: &str) -> Result<i64, String> {
-    let (y, m, d) = parse_date(s.trim()).ok_or_else(|| format!("invalid date `{s}` (use YYYY-MM-DD)"))?;
-    Ok(local_midnight(y, m, d))
+fn day(s: &str) -> Result<(i64, u32, u32), String> {
+    parse_date(s.trim()).ok_or_else(|| format!("invalid date `{s}` (use YYYY-MM-DD)"))
+}
+
+fn midnight((y, m, d): (i64, u32, u32)) -> i64 {
+    local_midnight(y, m, d)
+}
+
+/// Where a date ends: the following date's local midnight.
+fn day_end(date: (i64, u32, u32)) -> i64 {
+    midnight(add_days(date, 1))
 }
 
 // ─── Matching ───────────────────────────────────────────────────────────────
@@ -1051,6 +1059,25 @@ mod tests {
         assert_eq!(names("size:<8000000tb"), names("file:"));
         assert_eq!(names("dm:1000y"), names(""), "a span before 1601 matches every date");
         assert!(parse("size:9223372036854774784").is_ok());
+    }
+
+    /// A day ends at the next date's local midnight, not 24 hours after it starts, which is an
+    /// hour off on a daylight-saving day. Checked against `local_midnight`, so it holds in any
+    /// time zone; the dates cross a month end, a leap day and a year end.
+    #[test]
+    fn date_ranges_end_at_the_next_dates_midnight() {
+        let m = local_midnight;
+        let range = |q: &str| match parse_date_cmp(q).unwrap() {
+            Cmp::Range(lo, hi) => (lo, hi),
+            c => panic!("`{q}` gave {c:?}"),
+        };
+        assert_eq!(range("2026-03-29"), (m(2026, 3, 29), m(2026, 3, 30)));
+        assert_eq!(range("2026-10-25"), (m(2026, 10, 25), m(2026, 10, 26)));
+        assert_eq!(range("2024-02-28..2024-02-29"), (m(2024, 2, 28), m(2024, 3, 1)));
+        assert_eq!(range("2026-12-31"), (m(2026, 12, 31), m(2027, 1, 1)));
+        assert!(matches!(parse_date_cmp(">2026-03-31").unwrap(), Cmp::Ge(t) if t == m(2026, 4, 1)));
+        assert!(matches!(parse_date_cmp("<=2026-02-28").unwrap(), Cmp::Lt(t) if t == m(2026, 3, 1)));
+        assert!(matches!(parse_date_cmp("<2026-02-28").unwrap(), Cmp::Lt(t) if t == m(2026, 2, 28)));
     }
 
     #[test]
