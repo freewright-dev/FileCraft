@@ -246,6 +246,9 @@ All notable changes to this project are documented here. The format follows
 - Indexing fails with a clear error instead of corrupting the index when a drive exceeds the
   index format's limits: about 4 billion entries (the folder scan's id counter used to wrap to the
   root's id) or 4 GiB of file names (offsets used to wrap onto other names) (MIN-04).
+- The folder scan's id counter can no longer hand out ids past the limit when several workers run
+  out at once. It used to wrap, so workers could draw the reserved id, the root's id and reused ids
+  before noticing; it now stops at the last valid id.
 - The cache of unfiltered results (an empty query) holds the snapshot it was computed on instead of
   only its address, so a newer snapshot allocated at a reused address can never be shown the old
   results (MIN-04).

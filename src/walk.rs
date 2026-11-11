@@ -142,12 +142,10 @@ fn read_one_dir(
             continue;
         };
         let (attrs, size, mtime) = attributes(&meta);
-        let idx = shared.next_id.fetch_add(1, Ordering::Relaxed);
-        // The counter would wrap to the root's id; stop instead (the walk then fails).
-        if idx == NONE || idx == 0 {
+        let Some(idx) = next_entry_id(&shared.next_id) else {
             shared.out_of_ids.store(true, Ordering::Relaxed);
             break;
-        }
+        };
         if attrs & ATTR_DIRECTORY != 0 && attrs & ATTR_REPARSE_POINT == 0 {
             shared.pending.fetch_add(1, Ordering::AcqRel);
             let job = (entry.path(), idx);
@@ -164,6 +162,23 @@ fn read_one_dir(
     }
     if !batch.is_empty() {
         let _ = out_tx.send(batch);
+    }
+}
+
+/// Hands out the next entry id, or `None` once the last valid id is used. The counter stops at
+/// `NONE` instead of wrapping, so no worker can ever draw `NONE`, the root's id 0 or a reused id.
+fn next_entry_id(next: &AtomicU32) -> Option<u32> {
+    // A plain CAS loop: `fetch_update` is deprecated (renamed `try_update`) on newer toolchains,
+    // and `try_update` does not exist on older ones.
+    let mut id = next.load(Ordering::Relaxed);
+    loop {
+        if id == NONE || id == 0 {
+            return None;
+        }
+        match next.compare_exchange_weak(id, id + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(id),
+            Err(current) => id = current,
+        }
     }
 }
 
@@ -275,6 +290,19 @@ mod tests {
         let ids: Vec<u32> = batches.iter().flatten().map(|r| r.idx).collect();
         assert!(out_of_ids);
         assert_eq!(ids, [NONE - 2, NONE - 1]);
+    }
+
+    /// Concurrent workers used to keep drawing ids past the limit (`NONE`, 0, 1, …) from a
+    /// wrapping counter before seeing `out_of_ids`. The allocator now refuses for good.
+    #[test]
+    fn id_allocator_refuses_after_the_limit() {
+        let next = AtomicU32::new(NONE - 2);
+        assert_eq!(next_entry_id(&next), Some(NONE - 2));
+        assert_eq!(next_entry_id(&next), Some(NONE - 1));
+        for _ in 0..3 {
+            assert_eq!(next_entry_id(&next), None);
+        }
+        assert_eq!(next.load(Ordering::Relaxed), NONE);
     }
 
     /// MIN-02: unreadable folders are counted instead of silently missing.
