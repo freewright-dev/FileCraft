@@ -79,6 +79,8 @@ Folder sizes are the sum of all files below them, propagated up the parent chain
     <pipe>` with the `runas` verb.
   - **Connect.** The helper accepts only FileCraft's pipe names. It opens the pipe with
     `SECURITY_IDENTIFICATION`, so whoever serves the pipe cannot impersonate its elevated token.
+    The window checks the client's process id (`GetNamedPipeClientProcessId`) against the
+    helper it started; any other client is disconnected and the window keeps waiting.
   - **Serve.** It answers one request at a time ("index drive X") with progress messages and
     the index in the cache format. It writes no files, reads no settings, starts nothing, and
     exits when the pipe closes. A progress message that cannot be sent cancels the read in

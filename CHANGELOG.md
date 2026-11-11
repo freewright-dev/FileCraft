@@ -334,3 +334,8 @@ All notable changes to this project are documented here. The format follows
   - it is reached through a single-instance, local-only pipe and cannot be impersonated through it;
   - the window checks everything it sends like a cache file.
   The safeguards above still apply when FileCraft itself is started as administrator.
+- Another program of the same user can no longer pose as the NTFS helper. The pipe's name can be
+  listed and any unelevated program could open it first, and FileCraft trusted whichever program
+  connected: it could feed in a made-up index (fake names offered for open, edit and delete, and
+  saved to the cache) and lock the real helper out. FileCraft now checks that the connected
+  process is the helper it started, disconnects anyone else and keeps waiting for the helper.

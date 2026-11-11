@@ -272,7 +272,7 @@ impl MftHelper {
 
         let pipe = win::create_server(&name)?;
         let process = win::start_elevated(&format!("{HELPER_ARG} {name}"))?;
-        win::wait_connected(&pipe, || win::has_exited(&process), Duration::from_secs(60))?;
+        win::wait_connected(&pipe, win::process_id(&process)?, || win::has_exited(&process), Duration::from_secs(60))?;
         Ok(MftHelper::new(std::fs::File::from(pipe)))
     }
 
@@ -302,6 +302,7 @@ fn valid_pipe_name(name: &str) -> bool {
 
 /// Opens the window's pipe. With `SECURITY_IDENTIFICATION`, the pipe's server (or a program that
 /// took the name first) can learn who connected but cannot act with the helper's elevated token.
+/// While another program holds the pipe, waits for the window to turn it away.
 fn open_client(name: &str) -> io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
@@ -310,7 +311,16 @@ fn open_client(name: &str) -> io::Result<std::fs::File> {
         use std::os::windows::fs::OpenOptionsExt;
         options.security_qos_flags(windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION);
     }
-    options.open(name)
+    let start = Instant::now();
+    loop {
+        match options.open(name) {
+            #[cfg(windows)]
+            Err(e) if e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) && start.elapsed() < Duration::from_secs(10) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -318,13 +328,15 @@ mod win {
     use std::io;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, GetLastError, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, GetLastError, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
-        SetNamedPipeHandleState,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, PIPE_NOWAIT, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, SetNamedPipeHandleState,
     };
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::System::Threading::{GetProcessId, WaitForSingleObject};
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
@@ -354,18 +366,27 @@ mod win {
         Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
     }
 
-    /// Waits until a client has connected, then switches the pipe to blocking I/O.
-    pub fn wait_connected(pipe: &OwnedHandle, gave_up: impl Fn() -> bool, timeout: Duration) -> io::Result<()> {
+    /// Waits until process `client_pid` has connected, then switches the pipe to blocking I/O.
+    /// Anyone can open the pipe by name, so any other client is disconnected and the wait goes
+    /// on: only the helper this window started may talk to it.
+    pub fn wait_connected(pipe: &OwnedHandle, client_pid: u32, gave_up: impl Fn() -> bool, timeout: Duration) -> io::Result<()> {
         let start = Instant::now();
         loop {
             // SAFETY: a live pipe handle in non-blocking mode; no OVERLAPPED.
             let ok = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) };
             // SAFETY: no arguments.
             let err = unsafe { GetLastError() };
+            // A nonzero result means the pipe is listening again after a disconnect; only
+            // ERROR_PIPE_CONNECTED reports a connected client.
             if ok == 0 && err == ERROR_PIPE_CONNECTED {
-                break;
-            }
-            if ok == 0 && err != ERROR_PIPE_LISTENING {
+                if client_process_id(pipe) == Some(client_pid) {
+                    break;
+                }
+                disconnect(pipe)?;
+            } else if ok == 0 && err == ERROR_NO_DATA {
+                // A client connected and closed its end before it was checked.
+                disconnect(pipe)?;
+            } else if ok == 0 && err != ERROR_PIPE_LISTENING {
                 return Err(io::Error::from_raw_os_error(err as i32));
             }
             if gave_up() {
@@ -382,6 +403,28 @@ mod win {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    fn client_process_id(pipe: &OwnedHandle) -> Option<u32> {
+        let mut pid = 0u32;
+        // SAFETY: a live, connected pipe handle and a writable u32.
+        (unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle(), &mut pid) } != 0).then_some(pid)
+    }
+
+    fn disconnect(pipe: &OwnedHandle) -> io::Result<()> {
+        // SAFETY: a live pipe handle; the client's end is closed by force.
+        if unsafe { DisconnectNamedPipe(pipe.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn process_id(process: &OwnedHandle) -> io::Result<u32> {
+        // SAFETY: a live process handle.
+        match unsafe { GetProcessId(process.as_raw_handle()) } {
+            0 => Err(io::Error::last_os_error()),
+            pid => Ok(pid),
+        }
     }
 
     /// Starts this program elevated with `params` and returns its process handle.
@@ -436,7 +479,7 @@ mod tests {
         let server = win::create_server(&name).unwrap();
         let read = move |letter, progress: &AtomicUsize, total: &AtomicUsize, _: &AtomicBool| read(letter, progress, total);
         let helper = std::thread::spawn(move || serve(&mut open_client(&name).unwrap(), &read));
-        win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
+        win::wait_connected(&server, std::process::id(), || false, Duration::from_secs(10)).unwrap();
         (MftHelper::new(std::fs::File::from(server)), helper)
     }
 
@@ -592,7 +635,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        win::wait_connected(&server, || false, Duration::from_secs(10)).unwrap();
+        win::wait_connected(&server, std::process::id(), || false, Duration::from_secs(10)).unwrap();
         let mut window = MftHelper::new(std::fs::File::from(server));
         window.idle_timeout = Duration::from_millis(300);
 
@@ -604,6 +647,25 @@ mod tests {
         assert!(waited < Duration::from_secs(5), "waited {waited:?} for a silent helper");
         assert_eq!(err.map(|e| e.to_string()).as_deref(), Some("the NTFS helper stopped answering"));
         assert!(!window.is_alive());
+    }
+
+    /// Any program of the user can open the pipe by name. The window only accepts the helper it
+    /// started: another client is disconnected and the wait goes on, so the real helper can
+    /// still connect. The first client used to be trusted, and could feed in a forged index.
+    #[test]
+    fn only_the_started_helper_may_connect() {
+        let name = pipe_name("a7");
+        let server = win::create_server(&name).unwrap();
+        // This test process connects, while the window waits for some other process.
+        let mut impostor = open_client(&name).unwrap();
+        let err = win::wait_connected(&server, std::process::id().wrapping_add(1), || false, Duration::from_millis(500)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(impostor.read(&mut [0u8; 1]).is_err(), "the impostor must be disconnected");
+        drop(impostor);
+
+        let client = std::thread::spawn(move || open_client(&name));
+        win::wait_connected(&server, std::process::id(), || false, Duration::from_secs(10)).unwrap();
+        client.join().unwrap().unwrap();
     }
 
     /// A second server under the same name is refused, so no other program can stand in for
