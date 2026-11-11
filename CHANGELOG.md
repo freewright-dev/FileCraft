@@ -155,6 +155,9 @@ All notable changes to this project are documented here. The format follows
 - Pressing Enter, F4, the arrow keys and the other result shortcuts while typing in a Settings
   field (such as *External editor* or the hotkey) now edits the field. Enter used to open the
   selected result and the key never reached the field.
+- When the preview went away while a save was running, finishing the save no longer drops what
+  waited for it: closing the window or switching to another result now goes ahead, and the status
+  bar reports whether the file was saved.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

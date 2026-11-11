@@ -475,6 +475,13 @@ pub struct SaveDone {
     result: Result<FileVersion, SaveError>,
 }
 
+impl SaveDone {
+    /// The file and whether it was written, for when its preview has gone.
+    pub fn into_outcome(self) -> (PathBuf, Result<(), SaveError>) {
+        (self.path, self.result.map(|_| ()))
+    }
+}
+
 impl SaveJob {
     /// Writes the file. Refuses when it was changed, replaced or deleted on disk since it was
     /// loaded, unless `force`. The file is checked and written through one handle, so swapping
