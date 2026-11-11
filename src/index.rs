@@ -562,6 +562,9 @@ where
 const CACHE_MAGIC: &[u8; 8] = b"FFSIDX\0\x02";
 /// Largest cache file that is read: about 40 million entries at roughly 100 bytes each.
 const MAX_CACHE_BYTES: u64 = 4 << 30;
+/// Most entries a cache may hold, the NTFS reader's record limit. The file size alone allowed
+/// over 100 million, whose parsed tables and checks need well over 12 GiB.
+const MAX_CACHE_ENTRIES: usize = 64 << 20;
 /// Serialized size of one [`Entry`].
 const ENTRY_BYTES: usize = 36;
 
@@ -696,11 +699,23 @@ impl VolumeIndex {
     /// than a panic, so a corrupt or foreign cache is ignored and rebuilt.
     pub fn load(path: &Path, letter: char) -> io::Result<VolumeIndex> {
         let data = read_with_budget(path, MAX_CACHE_BYTES)?;
-        Self::from_bytes(&data, letter)
+        let index = Self::parse(&data, letter)?;
+        // Free the file's bytes before the tree and order checks allocate their own tables.
+        drop(data);
+        index.check()?;
+        Ok(index)
     }
 
     /// Parses an index in the cache format with every check [`VolumeIndex::load`] applies.
     pub fn from_bytes(data: &[u8], letter: char) -> io::Result<VolumeIndex> {
+        let index = Self::parse(data, letter)?;
+        index.check()?;
+        Ok(index)
+    }
+
+    /// Parses the cache format, checking every range, id and length; [`VolumeIndex::check`]
+    /// must still verify the tree and the sort orders.
+    fn parse(data: &[u8], letter: char) -> io::Result<VolumeIndex> {
         if data.len() as u64 > MAX_CACHE_BYTES {
             return Err(invalid("index too large"));
         }
@@ -724,7 +739,10 @@ impl VolumeIndex {
         let lower = r.string()?;
 
         let count = r.len()?;
-        if count == 0 || count > (u32::MAX - 1) as usize || count.checked_mul(ENTRY_BYTES).is_none_or(|n| n > data.len()) {
+        if count > MAX_CACHE_ENTRIES {
+            return Err(invalid("too many entries in cache"));
+        }
+        if count == 0 || count.checked_mul(ENTRY_BYTES).is_none_or(|n| n > data.len()) {
             return Err(invalid("bad entry count"));
         }
         let mut entries = Vec::with_capacity(count);
@@ -754,7 +772,6 @@ impl VolumeIndex {
         if entries[0].parent != NONE || !entries[0].is_dir() {
             return Err(invalid("bad root entry"));
         }
-        check_tree(&entries)?;
 
         // Each order lists every entry that has a parent (so not the root) exactly once.
         let listed = entries.iter().skip(1).filter(|e| e.parent != NONE).count();
@@ -782,8 +799,6 @@ impl VolumeIndex {
         let by_size = orders.pop().unwrap();
         let by_path = orders.pop().unwrap();
         let by_name = orders.pop().unwrap();
-        check_orders(&entries, &lower, &by_name, &by_path, &by_size, &by_date)?;
-
         Ok(VolumeIndex {
             letter,
             source,
@@ -797,6 +812,13 @@ impl VolumeIndex {
             by_size,
             by_date,
         })
+    }
+
+    /// The checks of a parsed cache that need tables of their own: every entry reaches the root,
+    /// and the orders are sorted the way [`VolumeBuilder::finish`] sorts them.
+    fn check(&self) -> io::Result<()> {
+        check_tree(&self.entries)?;
+        check_orders(&self.entries, &self.lower, &self.by_name, &self.by_path, &self.by_size, &self.by_date)
     }
 }
 
@@ -1210,6 +1232,20 @@ pub mod tests {
             bytes[path_at + 4 * k..path_at + 4 * k + 4].copy_from_slice(&id.to_le_bytes());
         }
         load_error("folders-out-of-order", &bytes, 'C');
+    }
+
+    /// A cache's entry count was bounded only by its size: a 4 GiB file could declare over 100
+    /// million entries, whose tables and checks need more than 12 GiB. Counts above the NTFS
+    /// reader's record limit are rejected before anything is allocated for them.
+    #[test]
+    fn caches_with_too_many_entries_are_rejected() {
+        let v = sample();
+        let count_at = 8 + 4 + 1 + 8 + 8 + (8 + v.names.len()) + (8 + v.lower.len());
+        let mut bytes = cache_bytes(&v);
+        assert_eq!(bytes[count_at..count_at + 8], (v.entries.len() as u64).to_le_bytes());
+        bytes[count_at..count_at + 8].copy_from_slice(&(MAX_CACHE_ENTRIES as u64 + 1).to_le_bytes());
+        let err = load_error("too-many-entries", &bytes, 'C');
+        assert!(err.to_string().contains("too many entries"), "{err}");
     }
 
     /// FC-02: the audit's 21-byte cache with an overflowing timestamp used to panic (and abort).
