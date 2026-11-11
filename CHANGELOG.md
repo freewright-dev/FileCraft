@@ -173,6 +173,9 @@ All notable changes to this project are documented here. The format follows
   mounted drives) a folder scan listed without entering. Their contents were left out with no
   sign, so a disk mounted into a folder without a drive letter was never indexed while the drive
   looked complete.
+- A fixed drive with an I/O fault no longer brings up a Windows error dialog before FileCraft's
+  window opens. Checking each drive's file system at startup could show a "drive not ready" style
+  system message; the check now fails quietly and the drive shows without a file system.
 - Out-of-range numbers in queries, such as `size:9223372036854775807` or `dm:9223372036854775807y`,
   are reported as errors instead of panicking the search worker (debug builds) or wrapping into
   wrong filters (release builds). A relative date reaching back before 1601 matches every date.
