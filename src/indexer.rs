@@ -300,8 +300,14 @@ pub fn is_elevated() -> bool {
 #[cfg(windows)]
 pub fn fixed_drives() -> Vec<Drive> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetThreadErrorMode};
     const DRIVE_FIXED: u32 = 3;
 
+    // This runs before the window exists: a drive with an I/O fault must not raise a system
+    // error dialog ("drive not ready") while it is probed, it just shows no file system.
+    let mut old_mode = 0;
+    // SAFETY: valid mode flags and a writable u32 for the previous mode; affects this thread only.
+    let restore = unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &mut old_mode) } != 0;
     // SAFETY: no arguments.
     let mask = unsafe { GetLogicalDrives() };
     let mut drives = Vec::new();
@@ -339,6 +345,10 @@ pub fn fixed_drives() -> Vec<Drive> {
             filesystem: if ok != 0 { text(&fs) } else { String::new() },
             label: if ok != 0 { text(&label) } else { String::new() },
         });
+    }
+    if restore {
+        // SAFETY: restores the mode read above; the previous mode is not needed.
+        unsafe { SetThreadErrorMode(old_mode, std::ptr::null_mut()) };
     }
     drives
 }
