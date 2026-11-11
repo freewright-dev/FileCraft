@@ -231,8 +231,9 @@ impl Job {
         let mut result = match (use_mft, helper) {
             (false, _) => Err(anyhow::anyhow!("no administrator rights")),
             (true, _) if self.elevated => mft::read_volume(letter, &self.progress, &self.total, &self.cancel),
-            // The helper cannot be interrupted; a cancelled job just drops its result.
-            (true, Some(h)) => h.read_volume(letter, &self.progress, &self.total).and_then(|v| {
+            // The helper cannot be interrupted once it reads; a job cancelled while it waited
+            // for the pipe is not sent, and one cancelled later just drops its result.
+            (true, Some(h)) => h.read_volume(letter, &self.progress, &self.total, &self.cancel).and_then(|v| {
                 anyhow::ensure!(!self.cancel.load(Ordering::Relaxed), "cancelled");
                 Ok(v)
             }),
