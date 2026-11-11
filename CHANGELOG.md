@@ -172,6 +172,10 @@ All notable changes to this project are documented here. The format follows
   was not saved), with no error. Text that is not a hotkey gives way to the hotkey in effect when
   Settings closes, and its error no longer replaces a message saying why quick search is not
   working.
+- `Shift+Enter` in the quick search bar no longer discards your saved search options for good. It
+  still switches the main window to the default options so that it shows the bar's results, but
+  only for the session: your own Match case, Match path and Regex choices are what is remembered,
+  unless you change an option yourself afterwards.
 - The save conflict check identifies the file by its full 64-bit volume serial and 128-bit file id
   (`FileIdInfo`) and compares its length as well as its content hash. The 64-bit file index used
   before cannot hold ReFS ids (MIN-04).
