@@ -130,6 +130,8 @@ All notable changes to this project are documented here. The format follows
 - Path queries (`\`, `/`, `path:`, *Match path*) no longer rebuild every result's full path from
   the drive root. On a 20,000-level folder chain each keystroke took about 2 s; it now takes
   milliseconds, whatever the sort column (FC-12).
+- A quoted term with a `/`, such as `"src/main"`, now matches full paths like the same term
+  without quotes. Only unquoted terms had their `/` read as `\`, so quoted ones found nothing.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).
