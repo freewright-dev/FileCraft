@@ -2,8 +2,8 @@
 //!
 //! Both belong to a hidden window on their own thread, because they have to work while the main
 //! window is hidden and `eframe` only runs the app's logic now and then. The hotkey shows the bar
-//! straight from this thread: Windows lets the process that received a hotkey take the foreground,
-//! and the bar appears without waiting for a repaint of the hidden main window.
+//! straight from this thread, so it appears without waiting for a repaint of the hidden main window;
+//! the bar then takes the foreground, which Windows allows the process that received a hotkey.
 
 use std::fmt;
 use std::sync::atomic::AtomicBool;
@@ -120,11 +120,11 @@ pub enum Event {
 }
 
 #[cfg(windows)]
-pub use platform::{Background, activate_running_instance, hide_bar};
+pub use platform::{Background, activate_running_instance, focus_bar, hide_bar};
 
 /// Other platforms have no quick search: `start` fails, so the window just closes as usual.
 #[cfg(not(windows))]
-pub use stub::{Background, activate_running_instance, hide_bar};
+pub use stub::{Background, activate_running_instance, focus_bar, hide_bar};
 
 #[cfg(not(windows))]
 mod stub {
@@ -149,6 +149,10 @@ mod stub {
     }
 
     pub fn hide_bar() {}
+
+    pub fn focus_bar() -> bool {
+        true
+    }
 }
 
 #[cfg(windows)]
@@ -255,7 +259,9 @@ mod platform {
             let Some(bar) = find_bar() else { return };
             // The main thread owns the bar, so everything here is asynchronous: a synchronous call
             // would wait for that thread to handle its messages, stalling this one while the UI is
-            // busy. The requests are queued in order, so the window is placed before it shows.
+            // busy. The requests are queued in order, so the window is placed before it shows. The
+            // bar takes the foreground itself once it is on screen (`focus_bar`): here the show
+            // has only been queued.
             // SAFETY: plain Win32 calls on a window of this process; a window that has just been
             // destroyed only makes them fail.
             unsafe {
@@ -266,7 +272,6 @@ mod platform {
                     // Before showing it, so the first frame the bar paints starts afresh.
                     self.signals.open.store(true, Ordering::Release);
                     ShowWindowAsync(bar, SW_SHOWNORMAL);
-                    SetForegroundWindow(bar);
                 }
             }
             self.ctx.request_repaint_of(quick_bar::viewport_id());
@@ -309,6 +314,21 @@ mod platform {
                 ShowWindowAsync(bar, SW_HIDE);
             }
         }
+    }
+
+    /// Gives the bar the foreground, once it is on screen; `false` while it is not yet. Called on
+    /// the bar's own thread, which owns the window, so the visibility it sees is current. The
+    /// hotkey still lets this process take the foreground then.
+    pub fn focus_bar() -> bool {
+        let Some(bar) = find_bar() else { return true };
+        // SAFETY: plain Win32 calls on a window of this process.
+        unsafe {
+            if IsWindowVisible(bar) == 0 {
+                return false;
+            }
+            SetForegroundWindow(bar);
+        }
+        true
     }
 
     /// Centers the bar near the top of the monitor the user is working on.

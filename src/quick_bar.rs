@@ -171,6 +171,8 @@ pub struct QuickBar {
     signals: Arc<BarSignals>,
     is_open: bool,
     focus_input: bool,
+    /// The bar has opened and still has to take the foreground, which it can only once it shows.
+    take_foreground: bool,
     /// The window has had the focus since it opened. Until then it not being focused says nothing.
     was_focused: bool,
     /// Where "show in FileCraft" sends the query.
@@ -200,6 +202,7 @@ impl QuickBar {
             signals,
             is_open: false,
             focus_input: false,
+            take_foreground: false,
             was_focused: false,
             to_main,
             last_height: height(0, false),
@@ -229,6 +232,7 @@ impl QuickBar {
     fn close(&mut self) {
         hotkey::hide_bar();
         self.is_open = false;
+        self.take_foreground = false;
         self.query.clear();
         self.needs_search = false;
         self.clear_results();
@@ -363,7 +367,15 @@ impl QuickBar {
         if self.signals.open.swap(false, Ordering::AcqRel) {
             self.is_open = true;
             self.focus_input = true;
+            self.take_foreground = true;
             self.was_focused = false;
+        }
+        if self.take_foreground {
+            if hotkey::focus_bar() {
+                self.take_foreground = false;
+            } else {
+                ctx.request_repaint();
+            }
         }
         match ctx.input(|i| i.viewport().focused) {
             Some(true) => self.was_focused = true,
