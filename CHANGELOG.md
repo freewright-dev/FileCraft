@@ -138,6 +138,9 @@ All notable changes to this project are documented here. The format follows
 - A search sorted by name, size or date over several drives no longer copies its whole merged
   result list once more before returning it: about 40 MB of memory traffic per keystroke on a
   5-million-entry index.
+- A keystroke no longer starts a thread per drive plus up to 32 more per drive (128 or more on a
+  machine with four drives) to filter the index. All drives now share one set of at most as many
+  threads as the CPU runs at once, and filtering fewer than 50,000 entries starts none.
 - A cache stamped with a build time more than five minutes in the future (clock skew, or a
   corrupt cache) no longer blocks every later save. The drive used to be rebuilt on every launch
   and its new index never written back, silently (FC-11).

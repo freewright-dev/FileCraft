@@ -125,9 +125,11 @@ of the last path and only adds or drops the names that differ, so a query with p
 filtered in path order (where consecutive paths share most of their folders) and its hits are
 then taken in the requested order. That keeps path queries linear however deep the folders.
 
-Each drive is filtered on its own thread, and drives with more than 50,000 entries are split
-across worker threads by chunks of the sort order. Per-drive results are then merged pairwise in
-parallel rounds by the sort key (path order just concatenates drives in letter order).
+Queries over more than 50,000 entries in all are cut into parts of each drive's sort order, and
+one set of worker threads (as many as the CPU runs at once, at most 32) works through the parts
+of every drive; smaller queries are filtered on the searcher's own thread. Per-drive results are then
+merged pairwise in parallel rounds by the sort key (path order just concatenates drives in letter
+order).
 
 The `Searcher` runs on a background thread. Every keystroke submits a request with a new
 generation number; running searches check it periodically and abandon stale work, and only the

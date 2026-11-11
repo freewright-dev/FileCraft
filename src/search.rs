@@ -24,7 +24,7 @@ use regex::{Regex, RegexBuilder};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -511,78 +511,102 @@ impl Query {
 
 const CANCEL_CHECK: usize = 1 << 15;
 
-/// Filters one volume, keeping the order of `order`. Returns `None` when cancelled.
-fn filter_volume(v: &VolumeIndex, order: &[u32], q: &Query, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
-    if q.is_empty() {
-        return Some(order.to_vec());
-    }
-    // Paths are cheap to build in path order, where each one extends or shortens the last
-    // (see `DirChain`). So a path query is filtered in path order, and its hits are then taken
-    // in the requested order: linear whatever the sort, however deep the folders (FC-12).
-    if q.uses_path() && !std::ptr::eq(order, v.by_path.as_slice()) {
-        let hits = filter_volume(v, &v.by_path, q, cancelled)?;
-        let mut keep = vec![false; v.slots()];
-        for &idx in &hits {
-            keep[idx as usize] = true;
-        }
-        return Some(order.iter().copied().filter(|&idx| keep[idx as usize]).collect());
-    }
-    let threads = thread_count();
-    if order.len() < 50_000 || threads == 1 {
-        let mut scratch = Scratch::default();
-        let mut out = Vec::new();
-        for (n, &idx) in order.iter().enumerate() {
-            if n % CANCEL_CHECK == 0 && cancelled() {
-                return None;
-            }
-            if q.matches(v, idx, &mut scratch) {
-                out.push(idx);
-            }
-        }
-        return Some(out);
-    }
+/// Below this many entries to test, a query runs on the calling thread alone.
+const PARALLEL_MIN: usize = 50_000;
 
-    let chunk = order.len().div_ceil(threads);
-    let parts: Vec<Option<Vec<u32>>> = std::thread::scope(|s| {
-        let handles: Vec<_> = order
-            .chunks(chunk)
-            .map(|part| {
-                s.spawn(move || {
-                    let mut scratch = Scratch::default();
-                    let mut out = Vec::new();
-                    for (n, &idx) in part.iter().enumerate() {
-                        if n % CANCEL_CHECK == 0 && cancelled() {
-                            return None;
-                        }
-                        if q.matches(v, idx, &mut scratch) {
-                            out.push(idx);
-                        }
-                    }
-                    Some(out)
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().ok().flatten()).collect()
-    });
-    let mut out = Vec::with_capacity(parts.iter().flatten().map(Vec::len).sum());
-    for part in parts {
-        out.extend(part?);
+/// Keeps the entries of `order`, all from `v`, that match. Returns `None` when cancelled.
+fn filter_part(v: &VolumeIndex, order: &[u32], q: &Query, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<u32>> {
+    // A scratch's folder chain belongs to one volume, so each part starts a fresh one.
+    let mut scratch = Scratch::default();
+    let mut out = Vec::new();
+    for (n, &idx) in order.iter().enumerate() {
+        if n % CANCEL_CHECK == 0 && cancelled() {
+            return None;
+        }
+        if q.matches(v, idx, &mut scratch) {
+            out.push(idx);
+        }
     }
     Some(out)
 }
 
+/// Filters every volume, keeping each one's matches in `key` order. Returns `None` when
+/// cancelled. The volumes are cut into parts that one set of at most [`thread_count`] threads
+/// works through, so a query starts no more threads than the machine runs at once, however
+/// many drives are indexed.
+fn filter_volumes(index: &Index, q: &Query, key: SortKey, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<Vec<u32>>> {
+    let volumes = &index.volumes;
+    if q.is_empty() {
+        return Some(volumes.iter().map(|v| v.order(key).to_vec()).collect());
+    }
+    // Paths are cheap to build in path order, where each one extends or shortens the last
+    // (see `DirChain`). So a path query is filtered in path order, and its hits are then taken
+    // in the requested order: linear whatever the sort, however deep the folders (FC-12).
+    let by_path = q.uses_path();
+    let orders: Vec<&[u32]> = volumes.iter().map(|v| if by_path { v.by_path.as_slice() } else { v.order(key) }).collect();
+    let total: usize = orders.iter().map(|o| o.len()).sum();
+    let threads = if total < PARALLEL_MIN { 1 } else { thread_count() };
+    let part_len = total.div_ceil(threads).max(1);
+    let parts: Vec<(usize, &[u32])> = orders
+        .iter()
+        .enumerate()
+        .flat_map(|(vol, order)| order.chunks(part_len).map(move |part| (vol, part)))
+        .collect();
+    let workers = threads.min(parts.len());
+
+    let found: Vec<Option<Vec<u32>>> = if workers <= 1 {
+        parts.iter().map(|&(vol, part)| filter_part(&volumes[vol], part, q, cancelled)).collect()
+    } else {
+        // Each worker takes the next part until none are left.
+        let next = AtomicUsize::new(0);
+        let done: Vec<Vec<(usize, Option<Vec<u32>>)>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, AtomicOrdering::Relaxed);
+                            let Some(&(vol, part)) = parts.get(i) else { break };
+                            mine.push((i, filter_part(&volumes[vol], part, q, cancelled)));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        let mut found = vec![None; parts.len()];
+        for (i, part) in done.into_iter().flatten() {
+            found[i] = part;
+        }
+        found
+    };
+
+    // A part that is missing (cancelled, or its worker panicked) leaves no result.
+    let found: Vec<Vec<u32>> = found.into_iter().collect::<Option<_>>()?;
+    let mut sizes = vec![0; volumes.len()];
+    for (&(vol, _), part) in parts.iter().zip(&found) {
+        sizes[vol] += part.len();
+    }
+    let mut lists: Vec<Vec<u32>> = sizes.into_iter().map(Vec::with_capacity).collect();
+    for (&(vol, _), part) in parts.iter().zip(found) {
+        lists[vol].extend(part);
+    }
+    if by_path && key != SortKey::Path {
+        for (list, v) in lists.iter_mut().zip(volumes) {
+            let mut keep = vec![false; v.slots()];
+            for &idx in list.iter() {
+                keep[idx as usize] = true;
+            }
+            *list = v.order(key).iter().copied().filter(|&idx| keep[idx as usize]).collect();
+        }
+    }
+    Some(lists)
+}
+
 /// Runs a query over every volume and merges the per-volume sorted results.
 pub fn search(index: &Index, q: &Query, sort: Sort, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<Hit>> {
-    let per_volume: Vec<Option<Vec<u32>>> = std::thread::scope(|s| {
-        let handles: Vec<_> = index
-            .volumes
-            .iter()
-            .map(|v| s.spawn(move || filter_volume(v, v.order(sort.key), q, cancelled)))
-            .collect();
-        handles.into_iter().map(|h| h.join().ok().flatten()).collect()
-    });
-    let lists: Vec<Vec<u32>> = per_volume.into_iter().collect::<Option<_>>()?;
-
+    let lists = filter_volumes(index, q, sort.key, cancelled)?;
     let mut hits = merge(index, &lists, sort.key);
     if sort.descending {
         hits.reverse();
@@ -870,6 +894,40 @@ mod tests {
             let took = start.elapsed();
             // About 2 s each before (optimised test profile); a few milliseconds now.
             assert!(took < Duration::from_millis(500), "`{text}` by {key:?} took {took:?}");
+        }
+    }
+
+    /// Large queries over several drives are cut into parts shared by one set of threads. The
+    /// parts must come back together in each drive's order, path queries included, and a
+    /// cancelled query must give no result.
+    #[test]
+    fn parallel_filtering_keeps_each_volumes_order() {
+        let mut index = Index::default();
+        for letter in ['C', 'D', 'E'] {
+            let mut b = VolumeBuilder::new(letter);
+            for i in 0..20_000u32 {
+                let dir = b.push(&format!("d{}", (i * 7919) % 20_000), 0, ATTR_DIRECTORY, 0, i64::from(i));
+                b.push(&format!("f{i}.txt"), dir, 0, u64::from(i % 97), i64::from(i % 13));
+                b.push(&format!("g{i}.rs"), dir, 0, u64::from(i % 89), i64::from(i % 7));
+            }
+            index = index.with_volume(Arc::new(b.finish(Source::Walk, Duration::ZERO)));
+        }
+        assert!(index.volumes.iter().map(|v| v.len()).sum::<usize>() >= PARALLEL_MIN);
+        for text in ["1", "!7 ext:rs", "\\d12", "path:3\\f"] {
+            let q = Query::parse(text, SearchOptions::default()).unwrap();
+            for key in [SortKey::Name, SortKey::Path, SortKey::Size, SortKey::Modified] {
+                let expected: Vec<Vec<u32>> = index
+                    .volumes
+                    .iter()
+                    .map(|v| {
+                        let mut scratch = Scratch::default();
+                        v.order(key).iter().copied().filter(|&idx| q.matches(v, idx, &mut scratch)).collect()
+                    })
+                    .collect();
+                assert!(expected.iter().all(|l| !l.is_empty()), "`{text}` matches on every drive");
+                assert_eq!(filter_volumes(&index, &q, key, &|| false).unwrap(), expected, "`{text}` by {key:?}");
+                assert!(filter_volumes(&index, &q, key, &|| true).is_none(), "`{text}` cancelled");
+            }
         }
     }
 
