@@ -96,13 +96,13 @@ impl Indexer {
         if let Some(c) = self.cancels.remove(&letter) {
             c.store(true, Ordering::Relaxed);
         }
-        self.status.lock().unwrap().remove(&letter);
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).remove(&letter);
     }
 
     /// (Re)indexes `drives`, cancelling any job already running for them. Cached indexes younger
     /// than `max_age` are used as-is unless `force`.
     pub fn start(&mut self, drives: Vec<Drive>, max_age: Duration, force: bool) {
-        let mut status = self.status.lock().unwrap();
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         for drive in drives {
             let cancel = Arc::new(AtomicBool::new(false));
             if let Some(old) = self.cancels.insert(drive.letter, Arc::clone(&cancel)) {
@@ -153,7 +153,7 @@ impl Indexer {
     pub fn is_busy(&self) -> bool {
         self.status
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .any(|s| matches!(s.phase, Phase::Waiting | Phase::Indexing(_)) || s.refreshing)
     }
@@ -180,7 +180,7 @@ impl Job {
         if self.cancel.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(s) = self.status.lock().unwrap().get_mut(&self.drive.letter) {
+        if let Some(s) = self.status.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&self.drive.letter) {
             f(s);
         }
         (self.notify)();
@@ -341,4 +341,25 @@ pub fn fixed_drives() -> Vec<Drive> {
 #[cfg(not(windows))]
 pub fn fixed_drives() -> Vec<Drive> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic in an indexing job while it updates the status poisons the status map. The UI
+    /// thread reads it every frame and used to panic too.
+    #[test]
+    fn a_poisoned_status_map_is_still_readable() {
+        let mut indexer = Indexer::new(|| {});
+        let status = Arc::clone(&indexer.status);
+        let _ = std::thread::spawn(move || {
+            let _guard = status.lock().unwrap();
+            panic!("an indexing job panicked");
+        })
+        .join();
+        assert!(indexer.status.is_poisoned());
+        assert!(!indexer.is_busy());
+        indexer.remove('C');
+    }
 }
