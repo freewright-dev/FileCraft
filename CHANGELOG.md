@@ -263,6 +263,11 @@ All notable changes to this project are documented here. The format follows
     environment, and shows the program it resolves to. It asks once per command per session.
   - Cache saves, the staging cleanup and save backups refuse to write when `%LOCALAPPDATA%\FileCraft`,
     `index` or `backup` is a junction or symbolic link, which could aim them at a protected folder.
+- The external editor is no longer looked up in the current folder. An empty or relative `PATH`
+  entry (`a;;b`, `.\bin`) made FileCraft look for the editor in whatever folder it was started
+  from, so a program planted there could run instead, and the program it reported could differ
+  from the one Windows then started. Such entries are skipped, a relative editor path is refused,
+  and the editor is started by the full path it was resolved to.
 - Fast NTFS indexing no longer runs the whole window as administrator (FC-18). **Run as admin**
   restarted FileCraft elevated, so opening files, editing, saving, backups, cache writes and the
   external editor all ran with administrator rights on state that unelevated programs can change.
