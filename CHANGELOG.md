@@ -97,6 +97,10 @@ All notable changes to this project are documented here. The format follows
   editor. The editor lays out the whole file as one block of text on every keystroke, so a
   multi-megabyte file took seconds per change and hundreds of MB of memory. A save also no longer
   keeps a second full copy of the text while it runs.
+- Save backups in `%LOCALAPPDATA%\FileCraft\backup` no longer pile up forever. A copy kept after a
+  failed save, or one another program held open when the save tried to delete it, stayed there for
+  good; FileCraft now deletes copies older than 7 days when it starts. Like the other writes there,
+  the cleanup refuses to work through a junction or symbolic link.
 - Small correctness fixes (MIN-02):
   - Dates such as `dm:2026-02-31` are rejected instead of rolling over into the next month.
   - A file with mixed `CRLF` and `LF` line endings is no longer converted silently. The editor

@@ -118,7 +118,8 @@ first frame.
   or create a deleted file again.
 - Saving writes into the existing file, so its permissions, attributes and hard links are kept.
   A copy of the original is kept in `%LOCALAPPDATA%\FileCraft\backup` until the write finishes;
-  if a save fails and the original cannot be restored, the error names that copy.
+  if a save fails and the original cannot be restored, the error names that copy. Copies older
+  than 7 days are deleted when FileCraft starts, so recover one before then.
 - Saving fails with "being used by another process" while another program has the file open
   for writing.
 - Switching to another result or closing the window with unsaved changes asks whether to save.

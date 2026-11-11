@@ -12,7 +12,7 @@
 | `src/search.rs` | Query language, parallel filtering, cross-drive merge, background searcher |
 | `src/quick_bar.rs` | The quick search bar: its window, its own searcher, launcher-style ranking of the hits |
 | `src/hotkey.rs` | Hotkey parsing; the background thread with the global hotkey and the tray icon |
-| `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts) |
+| `src/preview.rs` | Preview content (bounded image decoding) and inline editing (encoding, line endings, conflicts, save backups and their cleanup) |
 | `src/actions.rs` | Shell integration: open, reveal, properties, external editor |
 | `src/util.rs` | FILETIME and size formatting, local-time helpers, verbatim file-system paths (`fs_path`) and detection of names Win32 would rewrite (`win32_alias`) |
 
