@@ -249,6 +249,10 @@ All notable changes to this project are documented here. The format follows
 - The folder scan's id counter can no longer hand out ids past the limit when several workers run
   out at once. It used to wrap, so workers could draw the reserved id, the root's id and reused ids
   before noticing; it now stops at the last valid id.
+- The folder scan stores a name that is not valid Unicode (an NTFS name with an unpaired
+  surrogate) as `?`, as the NTFS index does, counts it as skipped and does not enter such a folder.
+  It stored the name with a replacement character before, so the entry could not be previewed,
+  opened or revealed, its contents were listed under a wrong path, and the drive looked fully indexed.
 - The cache of unfiltered results (an empty query) holds the snapshot it was computed on instead of
   only its address, so a newer snapshot allocated at a reused address can never be shown the old
   results (MIN-04).
