@@ -220,7 +220,7 @@ mod platform {
         AllowSetForegroundWindow, AppendMenuW, CW_USEDEFAULT, ChangeWindowMessageFilterEx, CreatePopupMenu, CreateWindowExW,
         DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
         GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, IMAGE_ICON,
-        IsWindowVisible, LoadImageW, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
+        IsWindowVisible, LR_SHARED, LoadImageW, MF_STRING, MSG, MSGFLT_ALLOW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SW_HIDE, SW_SHOWNORMAL, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE,
         SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindowAsync, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
         TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_NULL, WNDCLASSW, WS_OVERLAPPED,
@@ -428,12 +428,13 @@ mod platform {
         }
     }
 
-    /// The small app icon; resource id 1 is the one `build.rs` embeds.
+    /// The small app icon; resource id 1 is the one `build.rs` embeds. Shared, so loading it again
+    /// for every taskbar restart returns the same handle instead of leaking a new one.
     fn small_icon() -> HICON {
         // SAFETY: plain Win32 calls; a null result just leaves the tray icon blank.
         unsafe {
             let (cx, cy) = (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
-            LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as _, IMAGE_ICON, cx, cy, 0) as HICON
+            LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as _, IMAGE_ICON, cx, cy, LR_SHARED) as HICON
         }
     }
 
