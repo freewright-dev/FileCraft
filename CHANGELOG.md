@@ -49,6 +49,8 @@ All notable changes to this project are documented here. The format follows
   running in the notification area so that the hotkey keeps working. **Exit** (in the File menu or
   the icon's menu) quits, and turning quick search off in Settings restores the old behaviour. The
   first close explains this once and offers to exit instead.
+- Dependabot now also proposes weekly updates for the crates in `Cargo.lock`, not only for the
+  GitHub Actions. Fixes for crate advisories used to depend on someone running `cargo update`.
 
 ### Fixed
 

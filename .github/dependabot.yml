@@ -5,3 +5,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # Keeps the crates in Cargo.lock current, so fixes for advisories (which `cargo audit` reports
+  # but does not fix) arrive as pull requests. CI runs `cargo deny check` on each of them.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
