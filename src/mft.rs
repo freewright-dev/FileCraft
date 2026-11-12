@@ -614,10 +614,13 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
     const VISITING: u8 = 3;
 
     let n = recs.len();
+    // Every record is reached through the root. If it was not read (a torn read of the live
+    // volume), no parent reference matches its sequence number and the index would be empty
+    // yet look complete, so fail and let the folder scan take over.
+    let root_read = recs.get(ROOT_RECORD).is_some_and(|r| r.in_use && r.is_dir);
+    anyhow::ensure!(root_read, "the root folder's MFT record could not be read");
     let mut state = try_filled(n, UNKNOWN)?;
-    if ROOT_RECORD < n {
-        state[ROOT_RECORD] = VALID;
-    }
+    state[ROOT_RECORD] = VALID;
     let mut stack = Vec::new();
     for i in 0..n {
         let mut cur = i;
@@ -641,9 +644,7 @@ fn build(letter: char, recs: &[Rec], names: &str, links: &[Link], start: Instant
     }
 
     let mut ids = try_filled(n, NONE)?;
-    if ROOT_RECORD < n {
-        ids[ROOT_RECORD] = 0;
-    }
+    ids[ROOT_RECORD] = 0;
     let mut next = 1u32;
     for i in 0..n {
         if state[i] == VALID && i != ROOT_RECORD {
@@ -1030,6 +1031,29 @@ mod tests {
         let mut paths: Vec<String> = v.by_name.iter().map(|&i| v.full_path(i)).collect();
         paths.sort();
         assert_eq!(paths, [r"C:\New", r"C:\New\new child.txt"]);
+    }
+
+    /// A torn read of the root record (5) leaves it unparsed with sequence number 0, so no child
+    /// reference matches it. The result used to be an empty index that was reported as fresh;
+    /// now the read fails, which makes the indexer fall back to the folder scan.
+    #[test]
+    fn an_unreadable_root_record_is_an_error() {
+        let dir = RECORD_IN_USE | RECORD_IS_DIRECTORY;
+        let mut torn_root = record(dir, 0, &[file_name(5, ".", 3)]);
+        torn_root[1022] ^= 0xFF;
+        let file_root = record(RECORD_IN_USE, 0, &[file_name(5, ".", 3)]);
+        let unused_root = record(0, 0, &[file_name(5, ".", 3)]);
+        for root in [Some(torn_root), Some(file_root), Some(unused_root), None] {
+            let mut recs = vec![Rec::default(); 20];
+            let mut names = String::new();
+            let mut links = Vec::new();
+            let mut raw = vec![(16, record(dir, 0, &[file_name(5, "Users", 3)]))];
+            raw.extend(root.map(|r| (5, r)));
+            for (frn, rec) in raw.iter_mut() {
+                parse_record(rec, *frn, &mut recs, &mut names, &mut links);
+            }
+            assert!(build('C', &recs, &names, &links, Instant::now()).is_err());
+        }
     }
 
     #[test]

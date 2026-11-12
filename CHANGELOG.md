@@ -327,6 +327,10 @@ All notable changes to this project are documented here. The format follows
   5.4.3, which the CI supply-chain job rejected (FC-16).
 - The NTFS reader no longer defines `read_volume` twice for non-Windows targets, which stopped
   the crate from compiling there with E0428. CI only builds on Windows, so it went unnoticed.
+- A drive whose root MFT record cannot be read (for example a torn read of the live volume) is no
+  longer indexed as empty. No child record then matched the root, so the NTFS reader returned an
+  index with no entries, which was shown as ready, saved to the cache and trusted until it
+  expired. The read now fails and the folder scan takes over.
 
 ### Security
 
