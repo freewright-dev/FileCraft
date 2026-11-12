@@ -153,6 +153,15 @@ enum Activate {
     CopyPath,
 }
 
+/// What a key press asks the bar to do.
+#[derive(Clone, Copy)]
+enum Command {
+    Close,
+    /// Show all results in the main window.
+    ShowAll,
+    Activate(Activate),
+}
+
 pub struct QuickBar {
     ctx: egui::Context,
     index: Index,
@@ -265,6 +274,13 @@ impl QuickBar {
                 self.total = res.hits.len();
                 self.selected = 0;
                 self.shown = res.index;
+            } else {
+                // The rows belong to an older query; Enter must not open one of them while the
+                // footer reports an error for what is typed now.
+                self.rows.clear();
+                self.total = 0;
+                self.selected = 0;
+                self.shown = Index::default();
             }
         }
         if std::mem::take(&mut self.needs_search) {
@@ -314,7 +330,11 @@ impl QuickBar {
         }
     }
 
-    fn handle_keys(&mut self, ctx: &egui::Context) {
+    /// Takes this frame's key presses. Moving the selection happens at once; what a key asks for
+    /// is returned and run by `run` after the text box has taken this frame's typing. Typing and
+    /// Enter can arrive in one frame, and acting before the edit would use the previous query's
+    /// rows and text.
+    fn read_keys(&mut self, ctx: &egui::Context) -> Option<Command> {
         let (mut close, mut to_main, mut action) = (false, false, None);
         let mut nav = 0isize;
         ctx.input_mut(|i| {
@@ -339,13 +359,25 @@ impl QuickBar {
             self.selected = (self.selected as isize + nav).rem_euclid(self.rows.len() as isize) as usize;
         }
         if close {
-            self.close();
+            Some(Command::Close)
         } else if to_main {
-            let _ = self.to_main.send(self.query.clone());
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
-            self.close();
-        } else if let Some(action) = action {
-            self.activate(action, ctx);
+            Some(Command::ShowAll)
+        } else {
+            action.map(Command::Activate)
+        }
+    }
+
+    fn run(&mut self, command: Command, ctx: &egui::Context) {
+        match command {
+            Command::Close => self.close(),
+            Command::ShowAll => {
+                let _ = self.to_main.send(self.query.clone());
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                self.close();
+            }
+            // The rows are those of an older query until its search has answered.
+            Command::Activate(_) if self.searching || self.needs_search => {}
+            Command::Activate(action) => self.activate(action, ctx),
         }
     }
 
@@ -422,9 +454,7 @@ impl QuickBar {
             _ => {}
         }
         self.poll();
-        if self.is_open {
-            self.handle_keys(&ctx);
-        }
+        let command = if self.is_open { self.read_keys(&ctx) } else { None };
 
         let mut clicked = None;
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::symmetric(10, 0));
@@ -464,6 +494,9 @@ impl QuickBar {
                 });
             }
         });
+        if let Some(command) = command {
+            self.run(command, &ctx);
+        }
         if let Some(i) = clicked {
             self.selected = i;
             self.activate(Activate::Open, &ctx);
@@ -620,5 +653,54 @@ mod tests {
         let names = [("zz code", 0), ("code b", 0), ("code", 0), ("code a", 0)];
         assert_eq!(ranked(&names, "code", 2), ["code", "code b"]);
         assert_eq!(ranked(&names, "code", 0), Vec::<String>::new());
+    }
+
+    /// An open bar showing the rows of an earlier query "code".
+    fn bar_showing_rows() -> QuickBar {
+        let (index, hits) = index(&[("code.exe", 0), ("code.txt", 0)]);
+        let (to_main, _) = crossbeam_channel::unbounded();
+        let (errors, _) = std::sync::mpsc::channel();
+        let mut bar = QuickBar::new(egui::Context::default(), Arc::default(), to_main, errors);
+        bar.index = index.clone();
+        bar.shown = index;
+        bar.total = hits.len();
+        bar.rows = hits;
+        bar.query = "code".into();
+        bar.is_open = true;
+        bar
+    }
+
+    #[test]
+    fn a_query_error_drops_the_rows_of_the_previous_query() {
+        let mut bar = bar_showing_rows();
+        bar.query = "regex:(".into();
+        bar.needs_search = true;
+        let start = std::time::Instant::now();
+        loop {
+            bar.poll();
+            if !bar.searching {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "the search never answered");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(bar.error.is_some());
+        assert!(bar.rows.is_empty(), "Enter would open a result of the old query");
+    }
+
+    #[test]
+    fn enter_waits_for_the_search_of_what_was_typed() {
+        let ctx = egui::Context::default();
+        let copy = Command::Activate(Activate::CopyPath);
+        for (searching, needs_search) in [(true, false), (false, true)] {
+            let mut bar = bar_showing_rows();
+            bar.searching = searching;
+            bar.needs_search = needs_search;
+            bar.run(copy, &ctx);
+            assert!(bar.is_open, "acted on rows of an older query (searching: {searching})");
+        }
+        let mut bar = bar_showing_rows();
+        bar.run(copy, &ctx);
+        assert!(!bar.is_open, "the bar should act on rows that match the query");
     }
 }

@@ -45,6 +45,11 @@ an option yourself in the meantime.
 Opening or showing a result in Explorer closes the bar at once. If Windows then fails to open it,
 the main window's status bar says why.
 
+The rows on screen can still belong to the previous keystroke while a search runs. `Enter`,
+`Ctrl+Enter` and `Ctrl+Shift+C` do nothing until the results for what you typed have arrived, so
+they never act on an older result; press the key again once the footer shows the results. When the
+query is invalid, the old rows are cleared and the footer shows the error.
+
 While quick search is on, FileCraft keeps running in the notification area: closing the window only
 hides it, and the indexes stay in memory. Click the icon or start FileCraft again to bring the
 window back, and right-click the icon or use **File → Exit** to quit. The first time you close the

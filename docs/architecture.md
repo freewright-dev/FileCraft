@@ -187,6 +187,12 @@ is meant to be open, kept in `BarSignals`, instead of reading it. `WM_CLOSE` to 
 comes from outside (`taskkill` sends it to every top-level window), so it means "exit" and goes
 through the usual unsaved-edits question; the app stops the thread with a private message instead.
 
+Key presses are read before the text box takes the frame's typing but run after it (`read_keys`,
+then `run`), so a key pressed in the same frame as a character sees the new query. Open, Show in
+folder and Copy path are ignored while the bar is searching or about to (`searching` or
+`needs_search`), because the rows are those of an older query until the searcher answers; a query
+error clears them.
+
 Ranking runs on the bar searcher's thread. It looks at no more than the first 500,000 hits and keeps
 the best few, comparing how the name matches the first plain search term or quoted phrase, then
 programs and shortcuts, visibility, name length and depth.

@@ -331,6 +331,11 @@ All notable changes to this project are documented here. The format follows
   longer indexed as empty. No child record then matched the root, so the NTFS reader returned an
   index with no entries, which was shown as ready, saved to the cache and trusted until it
   expired. The read now fails and the folder scan takes over.
+- The quick search bar no longer opens a result of an earlier query. After a query error such as
+  `regex:(` it kept the old rows, so Enter opened one while the footer showed the error; and
+  Enter pressed right after typing acted on the rows of the previous keystroke. Errors now clear
+  the rows, and Enter, Ctrl+Enter and Ctrl+Shift+C wait until the search for what was typed has
+  answered.
 
 ### Security
 
