@@ -204,11 +204,6 @@ fn read_records(
     Ok(())
 }
 
-#[cfg(not(windows))]
-pub fn read_volume(_: char, _: &AtomicUsize, _: &AtomicUsize, _: &AtomicBool) -> anyhow::Result<VolumeIndex> {
-    anyhow::bail!("MFT indexing is only available on Windows")
-}
-
 #[cfg(windows)]
 fn volume_data(
     volume: &std::fs::File,

@@ -325,6 +325,8 @@ All notable changes to this project are documented here. The format follows
   Anything inconsistent falls back to the folder scan (FC-14).
 - `cargo deny check` passes again: the lockfile moves `clipboard-win` from the yanked 5.4.1 to
   5.4.3, which the CI supply-chain job rejected (FC-16).
+- The NTFS reader no longer defines `read_volume` twice for non-Windows targets, which stopped
+  the crate from compiling there with E0428. CI only builds on Windows, so it went unnoticed.
 
 ### Security
 
