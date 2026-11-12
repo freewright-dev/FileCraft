@@ -336,6 +336,10 @@ All notable changes to this project are documented here. The format follows
   Enter pressed right after typing acted on the rows of the previous keystroke. Errors now clear
   the rows, and Enter, Ctrl+Enter and Ctrl+Shift+C wait until the search for what was typed has
   answered.
+- Settings no longer accept a quick search hotkey of Shift plus a letter, digit or other ordinary
+  key (such as `Shift+A` or `Shift+Space`). Windows reserved it system-wide, so no other program
+  could type that capital letter or symbol any more. A hotkey needs Ctrl, Alt or Win, as the
+  guide always said; function keys such as `Shift+F5` still work.
 
 ### Security
 

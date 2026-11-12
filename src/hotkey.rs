@@ -55,8 +55,9 @@ fn is_function_key(key: u32) -> bool {
 }
 
 impl Hotkey {
-    /// Parses text like `Alt+Space` or `Ctrl+Shift+K`. Only a function key may go without a
-    /// modifier: any other key alone would stop working in every other program.
+    /// Parses text like `Alt+Space` or `Ctrl+Shift+K`. Only a function key may go without Ctrl,
+    /// Alt or Win: any other key, alone or with just Shift, would stop typing in every other
+    /// program.
     pub fn parse(text: &str) -> Result<Hotkey, String> {
         let mut modifiers = 0;
         let mut key = None;
@@ -77,8 +78,8 @@ impl Hotkey {
             }
         }
         let key = key.ok_or_else(|| format!("“{text}” does not name a key"))?;
-        if modifiers == 0 && !is_function_key(key) {
-            return Err("Add Ctrl, Alt, Shift or Win (only F1–F24 work alone)".into());
+        if modifiers & !MOD_SHIFT == 0 && !is_function_key(key) {
+            return Err("Add Ctrl, Alt or Win (only F1–F24 work without one)".into());
         }
         Ok(Hotkey { modifiers, key })
     }
@@ -710,6 +711,17 @@ mod tests {
         for text in ["", "Alt", "Ctrl+Alt", "Space", "k", "Alt+Nope", "Alt+K+L", "Alt+F25", "Alt+F0"] {
             assert!(Hotkey::parse(text).is_err(), "{text}");
         }
+    }
+
+    /// Shift alone only changes what a key types, so registering such a hotkey would take capitals,
+    /// `&` and `?` away from every other program.
+    #[test]
+    fn shift_alone_only_goes_with_a_function_key() {
+        for text in ["Shift+A", "Shift+Space", "Shift+7", "Shift+Enter", "Shift+`"] {
+            assert!(Hotkey::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(Hotkey::parse("Shift+F5").unwrap(), Hotkey { modifiers: MOD_SHIFT, key: 0x74 });
+        assert!(Hotkey::parse("Shift+Alt+A").is_ok());
     }
 
     #[test]
